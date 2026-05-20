@@ -8,64 +8,77 @@ import numpy as np
 import pinocchio as pin
 from pinocchio.visualize import MeshcatVisualizer
 
+# ============================================================
+# 带碰撞约束的可达工作空间（Collision-Aware Reachable Workspace）
+# 与 reachable-workspace.py 的区别：
+#   - 在采样过程中排除与障碍物碰撞的配置
+#   - 使用 reachableWorkspaceWithCollisions / reachableWorkspaceWithCollisionsHull
+#   - 场景中有三个胶囊体障碍物（手工放置在机械臂工作空间内）
+# 应用场景：
+#   - 考虑障碍物后的安全可达域分析
+#   - 运动规划中的可达性地图预计算
+# ============================================================
+
 
 def XYZRPYtoSE3(xyzrpy):
+    """将 [x, y, z, roll, pitch, yaw] 转换为 SE(3) 变换矩阵"""
     rotate = pin.utils.rotate
+    # R = Rx(roll) · Ry(pitch) · Rz(yaw)（固定轴外旋顺序）
     R = rotate("x", xyzrpy[3]) @ rotate("y", xyzrpy[4]) @ rotate("z", xyzrpy[5])
     p = np.array(xyzrpy[:3])
     return pin.SE3(R, p)
 
 
-# Load the URDF model.
 pinocchio_model_dir = Path(__file__).parent.parent / "models"
-
 model_path = pinocchio_model_dir / "example-robot-data/robots"
-mesh_dir = pinocchio_model_dir
-
-urdf_path = model_path / "panda_description/urdf/panda.urdf"
-srdf_path = model_path / "panda_description/srdf/panda.srdf"
+mesh_dir   = pinocchio_model_dir
+# Panda：7-DOF 工业机械臂，SRDF 中定义了自碰撞排除对
+urdf_path  = model_path / "panda_description/urdf/panda.urdf"
+srdf_path  = model_path / "panda_description/srdf/panda.srdf"
 
 robot, collision_model, visual_model = pin.buildModelsFromUrdf(urdf_path, mesh_dir)
 data = robot.createData()
 
-# Obstacle map
-# Capsule obstacles will be placed at these XYZ-RPY parameters
+# ---- 定义障碍物（三个胶囊体）----
+# XYZ-RPY 参数：[x, y, z, roll, pitch, yaw]
+# 这些位置手工选取，位于 Panda 机械臂工作空间内（0.3~0.8m 半径范围）
 oMobs = [
-    [0.40, 0.0, 0.30, np.pi / 2, 0, 0],
-    [-0.08, -0.0, 0.75, np.pi / 2, 0, 0],
-    [0.23, -0.0, 0.04, np.pi / 2, 0, 0],
+    [0.40,  0.0, 0.30, np.pi / 2, 0, 0],   # 正前方障碍物（竖置胶囊）
+    [-0.08, -0.0, 0.75, np.pi / 2, 0, 0],  # 后上方障碍物
+    [0.23,  -0.0, 0.04, np.pi / 2, 0, 0],  # 近前方低位障碍物
 ]
 
-# Load visual objects and add them in collision/visual models
-color = [1.0, 0.2, 0.2, 1.0]  # color of the capsules
-rad, length = 0.1, 0.4  # radius and length of capsules
+rad, length = 0.1, 0.4   # 胶囊体半径 0.1m，长度 0.4m
 for i, xyzrpy in enumerate(oMobs):
-    obs = pin.GeometryObject.CreateCapsule(rad, length)  # Pinocchio obstacle object
-    obs.meshColor = np.array(
-        [1.0, 0.2, 0.2, 1.0]
-    )  # Don't forget me, otherwise I am transparent ...
-    obs.name = f"obs{i}"  # Set object name
-    obs.parentJoint = 0  # Set object parent = 0 = universe
-    obs.placement = XYZRPYtoSE3(xyzrpy)  # Set object placement wrt parent
-    collision_model.addGeometryObject(obs)  # Add object to collision model
-    visual_model.addGeometryObject(obs)  # Add object to visual model
+    # CreateCapsule：创建胶囊几何对象（不绑定到特定关节）
+    obs = pin.GeometryObject.CreateCapsule(rad, length)
+    obs.meshColor  = np.array([1.0, 0.2, 0.2, 1.0])   # 红色
+    obs.name       = f"obs{i}"
+    obs.parentJoint = 0   # 固定在世界坐标系（不随任何关节运动）
+    obs.placement  = XYZRPYtoSE3(xyzrpy)   # 障碍物在世界系中的位姿
+    collision_model.addGeometryObject(obs)  # 加入碰撞模型（用于碰撞检测）
+    visual_model.addGeometryObject(obs)     # 加入视觉模型（用于显示）
 
-# Auto-collision pairs
+# ---- 碰撞对设置 ----
+# addAllCollisionPairs：先添加所有几何体对之间的碰撞对
 collision_model.addAllCollisionPairs()
+# removeCollisionPairs：从 SRDF 移除不需要的自碰撞对（相邻连杆等）
 pin.removeCollisionPairs(robot, collision_model, srdf_path)
 
-# Collision pairs
-nobs = len(oMobs)
-nbodies = collision_model.ngeoms - nobs
-robotBodies = range(nbodies)
-envBodies = range(nbodies, nbodies + nobs)
+# 手工添加"机器人连杆 vs 障碍物"的碰撞对
+# 不添加"障碍物 vs 障碍物"（障碍物之间不需要检测互相碰撞）
+nobs    = len(oMobs)
+nbodies = collision_model.ngeoms - nobs   # 机器人自身几何体数量
+robotBodies = range(nbodies)              # 机器人几何体 ID 范围
+envBodies   = range(nbodies, nbodies + nobs)  # 障碍物 ID 范围
 for a, b in itertools.product(robotBodies, envBodies):
+    # 笛卡尔积：每个机器人几何体与每个障碍物配对
     collision_model.addCollisionPair(pin.CollisionPair(a, b))
 
-# Geom data
-# Collision/visual models have been modified => re-generate corresponding data.
+# ---- 重新创建数据（修改 model 后必须重建 Data）----
+# 修改 collision_model（添加几何体）后，原有 collision_data 失效
 collision_data = pin.GeometryData(collision_model)
-visual_data = pin.GeometryData(visual_model)
+visual_data    = pin.GeometryData(visual_model)
 
 # Start a new MeshCat server and client.
 viz = MeshcatVisualizer(robot, collision_model, visual_model)
@@ -79,22 +92,21 @@ except ImportError as err:
     print(err)
     sys.exit(0)
 
-# # Load the robot in the viewer.
 viz.loadViewerModel()
-# Display a robot configuration.
-q0 = (robot.upperPositionLimit.T + robot.lowerPositionLimit.T) / 2
-horizon = 0.2  # seconds
-frame = robot.getFrameId(
-    robot.frames[-1].name
-)  # for example the last frame of the robot
+
+# ---- 工作空间计算参数 ----
+q0        = (robot.upperPositionLimit.T + robot.lowerPositionLimit.T) / 2
+horizon   = 0.2   # 时间范围 0.2 秒
+frame     = robot.getFrameId(robot.frames[-1].name)
 n_samples = 5
 facet_dims = 2
 
-# To have convex hull computation or just the points of the reachable workspace and then
-# compute it with cgal.
+# 本例默认使用非凸 CGAL 方法（convex=False，需要安装 CGAL）
 convex = False
 
 if convex:
+    # reachableWorkspaceWithCollisionsHull：含碰撞过滤的凸包工作空间
+    # 内部在 Monte Carlo 采样时，排除与 collision_model 中障碍物碰撞的配置
     verts, faces = pin.reachableWorkspaceWithCollisionsHull(
         robot, collision_model, q0, horizon, frame, n_samples, facet_dims
     )
@@ -124,50 +136,37 @@ else:
         ]
 
     def alpha_shape_with_cgal(coords, alpha=None):
-        """
-        Compute the alpha shape of a set of points. (Code thanks to A. Skuric)
-        Retrieved from http://blog.thehumangeo.com/2014/05/12/drawing-boundaries-in-python/
-
-        :param coords : Coordinates of points
-        :param alpha: List of alpha values to influence the gooeyness of the border.
-        Smaller numbers don't fall inward as much as larger numbers.
-        Too large, and you lose everything!
-        :return: Shapely.MultiPolygons which is the hull of the input set of points
-        """
+        """用 CGAL Alpha-wrap 计算点云的非凸包络曲面（见 reachable-workspace.py 的详细注释）"""
         if alpha is None:
-            bbox_diag = np.linalg.norm(np.max(coords, 0) - np.min(coords, 0))
+            bbox_diag   = np.linalg.norm(np.max(coords, 0) - np.min(coords, 0))
             alpha_value = bbox_diag / 5
         else:
             alpha_value = np.mean(alpha)
-        # Convert to CGAL point
         points = [Point_3(pt[0], pt[1], pt[2]) for pt in coords]  # noqa: F405
-        # Compute alpha shape
-        Q = Polyhedron_3()
+        Q  = Polyhedron_3()
         _a = alpha_wrap_3(points, alpha_value, 0.01, Q)  # noqa: F405
         alpha_shape_vertices = np.array(
             [vertex_to_tuple(vertex.point()) for vertex in Q.vertices()]
         )
-
         alpha_shape_faces = np.array(
             [np.array(halfedge_to_triangle(face.halfedge())) for face in Q.facets()]
         )
-
         return alpha_shape_vertices, alpha_shape_faces
 
+    # reachableWorkspaceWithCollisions：返回碰撞过滤后的可达点集
     verts = pin.reachableWorkspaceWithCollisions(
         robot, collision_model, q0, horizon, frame, n_samples, facet_dims
     )
     verts = verts.T
 
-    alpha = 0.1
+    alpha       = 0.1   # 比 reachable-workspace.py 的 0.2 更紧（障碍物使空间更复杂）
     verts, faces = alpha_shape_with_cgal(verts, alpha)
-    verts = faces.reshape(-1, 3)
-    faces = np.arange(len(verts)).reshape(-1, 3)
+    verts       = faces.reshape(-1, 3)
+    faces       = np.arange(len(verts)).reshape(-1, 3)
 
 print("------------------- Display Vertex")
 
-
-# meshcat triangulated mesh
+# ---- Meshcat 三角网格显示 ----
 poly = g.TriangularMeshGeometry(vertices=verts, faces=faces)
 viz.viewer["poly"].set_object(
     poly, g.MeshBasicMaterial(color=0x000000, wireframe=True, linewidth=12, opacity=0.2)
@@ -179,5 +178,4 @@ while True:
         poly,
         g.MeshBasicMaterial(color=0x000000, wireframe=True, linewidth=2, opacity=0.2),
     )
-
     time.sleep(1e-2)

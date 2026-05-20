@@ -21,7 +21,7 @@ set(PROJECT_SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR})
 
 # Disable -Werror on Unix for now.
 set(CXX_DISABLE_WERROR True)
-set(CMAKE_VERBOSE_MAKEFILE True)
+set(CMAKE_VERBOSE_MAKEFILE False)
 
 # ----------------------------------------------------
 # --- OPTIONS  ---------------------------------------
