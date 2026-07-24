@@ -1,36 +1,15 @@
 //
 // Copyright (c) 2020 INRIA
 //
-#include "pinocchio/codegen/cppadcg.hpp"
-#include "pinocchio/autodiff/cppad.hpp"
 
-#include <Eigen/Cholesky>
-#include <Eigen/Core>
-#include <Eigen/Geometry>
+#include "pinocchio/codegen/cppadcg.hpp" // this file should be included first before all the others!
+#include "pinocchio/algorithm/crba.hpp"
 
-#include <boost/core/ref.hpp>
-#include <boost/fusion/algorithm.hpp>
-#include <boost/fusion/functional.hpp>
-#include <boost/variant.hpp>
-
-#include <cppad/cg/support/cppadcg_eigen.hpp>
+#include "pinocchio/parsers/urdf.hpp"
+#include "pinocchio/algorithm/joint-configuration.hpp"
+#include "pinocchio/codegen/code-generator-algo.hpp"
 
 #include <iostream>
-#include <string>
-
-#include "pinocchio/algorithm/check-data.hpp"
-#include "pinocchio/algorithm/crba.hpp"
-#include "pinocchio/algorithm/joint-configuration.hpp"
-#include "pinocchio/codegen/cppadcg-algo.hpp"
-#include "pinocchio/eigen-common.hpp"
-#include "pinocchio/math.hpp"
-#include "pinocchio/multibody.hpp"
-#include "pinocchio/multibody/joint.hpp"
-#include "pinocchio/parsers/urdf.hpp"
-#include "pinocchio/spatial.hpp"
-#include "pinocchio/utils/cast.hpp"
-#include "pinocchio/utils/check.hpp"
-#include "pinocchio/utils/static-if.hpp"
 
 int main(int argc, const char ** argv)
 {
@@ -38,7 +17,8 @@ int main(int argc, const char ** argv)
   using namespace Eigen;
 
   std::string filename =
-    EXAMPLE_ROBOT_DATA_MODEL_DIR + std::string("/ur_description/urdf/ur5_robot.urdf");
+    PINOCCHIO_MODEL_DIR
+    + std::string("/example-robot-data/robots/ur_description/urdf/ur5_robot.urdf");
   if (argc > 1)
     filename = argv[1];
 
