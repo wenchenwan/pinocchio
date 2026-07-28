@@ -10,17 +10,59 @@
 2. [核心数学基础](#2-核心数学基础)
    - [2.1 李群 SE(3)](#21-李群-se3)
    - [2.2 空间速度与空间力](#22-空间速度与空间力)
+     - [2.2.1 空间速度（Twist）](#221-空间速度twist)
+     - [2.2.2 空间力（Wrench）](#222-空间力wrench)
+     - [2.2.3 为什么是对偶空间：功率不变性](#223-为什么是对偶空间功率不变性)
+     - [2.2.4 坐标变换：伴随与余伴随](#224-坐标变换伴随与余伴随)
+     - [2.2.5 空间加速度：最反直觉的一个](#225-空间加速度最反直觉的一个)
+     - [2.2.6 运动方程中的 ω× 项](#226-运动方程中的-omegatimes-项)
+     - [2.2.7 参考系：LOCAL / WORLD / LOCAL_WORLD_ALIGNED](#227-参考系local--world--local_world_aligned)
+     - [2.2.8 速查对照表](#228-速查对照表)
+     - [2.2.9 为什么值得接受这套形式](#229-为什么值得接受这套形式)
    - [2.3 空间惯量](#23-空间惯量)
 3. [Model / Data 架构](#3-model--data-架构)
 4. [核心算法原理](#4-核心算法原理)
    - [4.1 正向运动学 FK](#41-正向运动学-fk)
+     - [4.1.1 Joint 层 vs Frame 层](#411-joint-层-vs-frame-层)
+     - [4.1.2 Frame 位姿更新的三个 API](#412-frame-位姿更新的三个-api)
+     - [4.1.3 两个必须避开的陷阱](#413-两个必须避开的陷阱)
+     - [4.1.4 选用建议](#414-选用建议)
+     - [4.1.5 配套的 Frame 层 API](#415-配套的-frame-层-api)
    - [4.2 逆向运动学 IK](#42-逆向运动学-ik)
+     - [4.2.1 为什么误差不能写成"目标减当前"](#421-为什么误差不能写成目标减当前)
+     - [4.2.2 关键推导：为什么需要 Jlog6](#422-关键推导为什么需要-jlog6)
+     - [4.2.3 阻尼最小二乘的来历](#423-阻尼最小二乘的来历)
+     - [4.2.4 流形积分](#424-流形积分)
+     - [4.2.5 完整算法](#425-完整算法)
    - [4.3 逆向动力学 RNEA](#43-逆向动力学-rnea)
+     - [4.3.1 从拉格朗日方程到递推形式](#431-从拉格朗日方程到递推形式)
+     - [4.3.2 第一趟：正向传播运动学](#432-第一趟正向传播运动学根--叶)
+     - [4.3.3 第二趟：反向传播力](#433-第二趟反向传播力叶--根)
+     - [4.3.4 由 RNEA 派生的三个常用量](#434-由-rnea-派生的三个常用量)
    - [4.4 正向动力学 ABA](#44-正向动力学-aba)
+     - [4.4.1 为什么不能直接求逆](#441-为什么不能直接求逆)
+     - [4.4.2 核心概念：关节化体惯量](#442-核心概念关节化体惯量)
+     - [4.4.3 递推公式的推导](#443-递推公式的推导)
+     - [4.4.4 三趟结构](#444-三趟结构)
    - [4.5 质量矩阵 CRBA](#45-质量矩阵-crba)
+     - [4.5.1 从动能出发](#451-从动能出发)
+     - [4.5.2 稀疏性：为什么大量元素恒为零](#452-稀疏性为什么大量元素恒为零)
+     - [4.5.3 复合刚体惯量与递推](#453-复合刚体惯量与递推)
+     - [4.5.4 性质与后续使用](#454-性质与后续使用)
    - [4.6 质心动量学](#46-质心动量学)
+     - [4.6.1 定义：把全身动量约化到质心](#461-定义把全身动量约化到质心)
+     - [4.6.2 为什么它是平衡控制的基础](#462-为什么它是平衡控制的基础)
+     - [4.6.3 API](#463-api)
    - [4.7 接触约束动力学](#47-接触约束动力学)
+     - [4.7.1 约束的三个层次](#471-约束的三个层次位置--速度--加速度)
+     - [4.7.2 从 Gauss 最小约束原理导出 KKT](#472-从-gauss-最小约束原理导出-kkt)
+     - [4.7.3 Delassus 矩阵与求解](#473-delassus-矩阵与求解)
+     - [4.7.4 约束类型与 Baumgarte 稳定化](#474-约束类型与-baumgarte-稳定化)
    - [4.8 解析梯度](#48-解析梯度)
+     - [4.8.1 RNEA 梯度](#481-rnea-梯度)
+     - [4.8.2 ABA 梯度与链式法则](#482-aba-梯度与链式法则)
+     - [4.8.3 与 DDP 的状态空间矩阵的关系](#483-与-ddp-的状态空间矩阵的关系)
+     - [4.8.4 运动学梯度](#484-运动学梯度)
 5. [Demo 注释：Python](#5-demo-注释python)
 6. [Demo 注释：C++](#6-demo-注释c)
 7. [人形机器人开发路径](#7-人形机器人开发路径)
@@ -90,40 +132,232 @@ $$n_v = n_{joints} + 6 \quad (\text{切空间维度，速度/加速度用此维�
 
 ### 2.2 空间速度与空间力
 
-Pinocchio 采用 Featherstone **空间代数（Spatial Algebra）** 统一描述运动与力：
+Pinocchio 采用 Featherstone **空间代数（Spatial Algebra）** 统一描述运动与力。
 
-**空间速度（Twist）**—— Motion 对象，$\mathbf{v} \in \mathbb{R}^6$：
+> **核心区别**：经典力学在"某个物体的质心 / 某个具体点"上定义速度和力；空间代数在
+> **整个刚体的运动场**上定义，参考点固定为**坐标系原点**。理解这一句，下面所有公式
+> 都会变得自然。
 
-$$\mathbf{v} = \begin{bmatrix} \omega \\ v \end{bmatrix}$$
+#### 2.2.1 空间速度（Twist）
 
-$\omega \in \mathbb{R}^3$ 为角速度，$v \in \mathbb{R}^3$ 为线速度（在 LOCAL 坐标系下）。
+刚体上任意一点 $P$ 的速度不是独立的，它由一个**速度场**决定。设刚体角速度为 $\omega$，
+刚体上参考点 $O$ 的速度为 $v_O$，则任意点 $P$ 的速度为：
 
-**空间力（Wrench）**—— Force 对象，$\mathbf{f} \in \mathbb{R}^6$：
+$$v_P = v_O + \omega \times \overrightarrow{OP}$$
 
-$$\mathbf{f} = \begin{bmatrix} \tau \\ f \end{bmatrix}$$
+关键观察：**$\omega$ 与参考点无关（刚体的固有属性），而 $v$ 依赖于参考点的选择。**
+因此完整描述刚体运动只需 6 个数：$(v_O,\ \omega)$，其中 $v_O$ 是**坐标系原点处的速度**。
 
-$\tau$ 为力矩，$f$ 为力。两者构成对偶关系，功率：
+$$\nu = \begin{bmatrix} v \\ \omega \end{bmatrix} \in \mathbb{R}^6, \qquad \nu \in \mathfrak{se}(3)$$
 
-$$P = \mathbf{f}^\top \mathbf{v} = \tau^\top\omega + f^\top v$$
+> ⚠️ **排列顺序**：Pinocchio 采用**线性在前、角速度在后**（Featherstone 原书相反）。
+> `Motion` 的内存布局中 `linear()` 占索引 0–2，`angular()` 占索引 3–5。
+> 本文档统一使用 Pinocchio 的约定。
 
-**坐标系约定（`ReferenceFrame`）**：
+```cpp
+pinocchio::Motion v;
+v.linear()   // v ∈ R³：坐标系原点处的线速度
+v.angular()  // ω ∈ R³：刚体角速度
+```
 
-| 枚举值 | 含义 |
-|--------|------|
-| `LOCAL` | 量在关节局部系下表达 |
-| `WORLD` | 量在世界系下表达 |
-| `LOCAL_WORLD_ALIGNED` | 原点在关节处，轴与世界系对齐 |
+**最大的陷阱：`v.linear()` 不是质心速度。**
+
+设关节 $i$ 的局部坐标系原点为 $O_i$，连杆质心为 $C$，$c = \overrightarrow{O_iC}$：
+
+$$\underbrace{v_C}_{\text{质心速度}} = \underbrace{v_{O_i}}_{\texttt{v.linear()}} + \omega \times c$$
+
+当坐标系原点不在质心时，`v.linear()` 是"刚体延拓后，恰好经过坐标系原点的那个**虚拟
+质点**的速度"，而不是任何实际物质点的速度。举例：一个绕自身固定轴自转的轮子，坐标系
+原点放在轴心上，此时 $v_O = 0$ 而 $\omega \neq 0$ —— 虽然轮缘每点都在运动，但空间速度
+的线性部分为零。
+
+#### 2.2.2 空间力（Wrench）
+
+作用在刚体上的一组力 $\{f_k\}$（作用点 $P_k$），可等效约化到坐标系原点 $O$：
+
+$$f = \sum_k f_k, \qquad \tau_O = \sum_k \overrightarrow{OP_k} \times f_k$$
+
+同样：**合力 $f$ 与约化点无关，而力矩 $\tau$ 依赖于约化点。**
+
+$$\phi = \begin{bmatrix} f \\ \tau_O \end{bmatrix} \in \mathbb{R}^6, \qquad \phi \in \mathfrak{se}(3)^*$$
+
+```cpp
+pinocchio::Force f;
+f.linear()   // f ∈ R³：合力（与参考点无关）
+f.angular()  // τ_O ∈ R³：对坐标系原点的合力矩（随原点变化）
+```
+
+**陷阱**：`f.angular()` 不是"纯力偶"，它包含两部分贡献——真正的力偶 + 合力对原点的
+力矩臂效应。换坐标系原点时 `f.angular()` 会变，`f.linear()` 不变。
+
+#### 2.2.3 为什么是对偶空间：功率不变性
+
+这是空间代数最本质的设计动机。**功率是标量，物理上与坐标系选择无关**：
+
+$$P = \phi^\top \nu = f \cdot v_O + \tau_O \cdot \omega$$
+
+验证其与参考点无关。换到新原点 $O'$，记 $r = \overrightarrow{OO'}$：
+
+$$v_{O'} = v_O + \omega\times r, \qquad \tau_{O'} = \tau_O - r\times f$$
+
+$$P' = f\cdot(v_O + \omega\times r) + (\tau_O - r\times f)\cdot\omega
+     = f\cdot v_O + \tau_O\cdot\omega + \underbrace{f\cdot(\omega\times r) - (r\times f)\cdot\omega}_{=\,0\ \text{（混合积轮换恒等式）}} = P$$
+
+因为功率必须不变，当 $\nu$ 按某规则变换时 $\phi$ 必须按其**逆转置**变换 —— 这正是
+"力生活在速度的对偶空间"的准确含义，也解释了为什么 Pinocchio 中变换速度用伴随
+（Adjoint），变换力用余伴随（Co-Adjoint，即伴随的转置）。
+
+#### 2.2.4 坐标变换：伴随与余伴随
+
+设 ${}^bM_a = (R,\ p) \in SE(3)$ 是从坐标系 $a$ 到 $b$ 的变换。
+
+**速度变换（伴随作用 Adjoint）**：
+
+$${}^b\nu = \mathrm{Ad}_{{}^bM_a}\,{}^a\nu, \qquad
+\mathrm{Ad}_{M} = \begin{bmatrix} R & \hat{p}R \\ 0 & R \end{bmatrix}$$
+
+展开成经典形式（这两行是理解全部的关键）：
+
+$${}^bv = R\,{}^av + p\times(R\,{}^a\omega), \qquad {}^b\omega = R\,{}^a\omega$$
+
+角速度只旋转；线速度旋转后还要加上**因参考点平移产生的牵连项** $p\times\omega$。
+
+**力变换（余伴随作用 Co-Adjoint）**：
+
+$${}^b\phi = \mathrm{Ad}_{{}^aM_b}^\top\,{}^a\phi
+= \begin{bmatrix} R & 0 \\ \hat{p}R & R \end{bmatrix}{}^a\phi$$
+
+展开：
+
+$${}^bf = R\,{}^af, \qquad {}^b\tau = R\,{}^a\tau + p\times(R\,{}^af)$$
+
+注意与速度变换的**对称性**：速度中 $\hat p$ 位于右上角（作用在 $\omega$ 上），力中
+$\hat p$ 位于左下角（作用在 $f$ 上）—— 这正是矩阵转置的结果，是对偶性的直接体现。
+物理解释也完全对应经典力学中你熟悉的**力的平移定理**：力平移后要加力矩臂效应 $p\times f$。
+
+```cpp
+Motion v_b = bMa.act(v_a);      // 速度：伴随 Ad_M
+Motion v_a = bMa.actInv(v_b);   // 逆变换 Ad_{M⁻¹}
+Force  f_b = bMa.act(f_a);      // 力：Pinocchio 自动使用余伴随
+Force  f_a = bMa.actInv(f_b);
+```
+
+#### 2.2.5 空间加速度：最反直觉的一个
+
+$$a = \dot\nu = \begin{bmatrix} \dot v_O \\ \dot\omega \end{bmatrix}$$
+
+**`a.linear()` 不是质心的经典加速度，甚至不等于原点物质点的经典加速度**：
+
+$$a_{\text{classic}}(O) = \dot v_O + \omega\times v_O$$
+
+多出来的 $\omega\times v_O$ 项，源于空间加速度定义为空间速度的**逐分量时间导数**，而
+经典加速度是物质点位置的二阶导。这个差异在 RNEA 中被系统性地吸收进递推公式，所以
+日常使用不必手工处理，但读源码时必须知道。
+
+```cpp
+data.a[i]                                 // 空间加速度（李代数导数）
+pinocchio::getClassicalAcceleration(...)  // 经典加速度（含 ω×v 修正）
+```
+
+#### 2.2.6 运动方程中的 $\omega\times$ 项
+
+Newton-Euler 方程在空间代数下压缩为一行：
+
+$$\phi = I\,a + \nu \times^* (I\,\nu)$$
+
+其中 $\times^*$ 是力的叉乘算子（`Motion::cross` 的对偶）。展开即经典形式：
+
+$$f = m\,a_C, \qquad \tau_C = \bar I_C\,\dot\omega + \underbrace{\omega\times(\bar I_C\,\omega)}_{\text{陀螺项，来自 }\nu\times^*}$$
+
+$\nu \times^* (I\nu)$ 就是所有离心力 / 科氏力 / 陀螺力矩的统一来源，也是 RNEA 中
+`data.f[i]` 递推的核心。
+
+#### 2.2.7 参考系：LOCAL / WORLD / LOCAL_WORLD_ALIGNED
+
+同一个物理量的三种表达。设关节 $i$ 的位姿 ${}^oM_i = (R,\ p)$：
+
+| 枚举值 | 原点 | 坐标轴 | 变换 |
+|--------|------|--------|------|
+| `LOCAL` | 关节 $i$ 原点 | 关节 $i$ 的轴 | ${}^i\nu$（原生存储） |
+| `WORLD` | **世界原点** | 世界轴 | $\mathrm{Ad}_{{}^oM_i}\,{}^i\nu$ |
+| `LOCAL_WORLD_ALIGNED` | 关节 $i$ 原点 | 世界轴 | $\mathrm{Ad}_{(R,\,0)}\,{}^i\nu$ |
+
+$$\nu^{\text{WORLD}} = \begin{bmatrix} Rv + p\times(R\omega) \\ R\omega \end{bmatrix},
+\qquad
+\nu^{\text{LWA}} = \begin{bmatrix} Rv \\ R\omega \end{bmatrix}$$
+
+关键理解：
+
+- `WORLD` 的线速度分量含 $p\times\omega$，是"**世界原点处虚拟点**的速度"——尽管名字
+  听起来最自然，它几乎不是你想要的物理量。
+- `LOCAL_WORLD_ALIGNED` 的线速度分量才是**末端执行器那一点的真实速度在世界轴下的分量**。
+
+**这就是为什么接触约束几乎总是用 `LOCAL_WORLD_ALIGNED`**（见
+[`contact-cholesky.py`](examples/contact-cholesky.py)、
+[`anymal-simulation.py`](examples/anymal-simulation.py) 中的 `CONTACT_3D`）：足端法向力
+沿世界 $Z$ 轴，且接触点速度必须是该点的真实速度（接触约束要求它为零）。
+
+Jacobian 同样遵循这套规则（$\nu = J(q)\,\dot q$）：
+`getFrameJacobian(..., LOCAL_WORLD_ALIGNED)` 的前 3 行才是你在工业机器人中熟悉的
+"几何 Jacobian 的平移部分"。
+
+#### 2.2.8 速查对照表
+
+| 空间代数 | 经典力学 | 关系 |
+|----------|----------|------|
+| `v.angular()` $\omega$ | 角速度 | 完全相同（与参考点无关） |
+| `v.linear()` $v_O$ | 原点处速度 | $v_C = v_O + \omega\times c$ |
+| `f.linear()` $f$ | 合力 | 完全相同（与参考点无关） |
+| `f.angular()` $\tau_O$ | 对原点的合力矩 | $\tau_C = \tau_O - c\times f$ |
+| `a.linear()` $\dot v_O$ | —— | $a_{\text{classic}} = \dot v_O + \omega\times v_O$ |
+| $\phi^\top\nu$ | 功率 | 完全相同（标量不变量） |
+| $\mathrm{Ad}_M$ | 速度平移公式 | $v' = Rv + p\times R\omega$ |
+| $\mathrm{Ad}_M^\top$ | 力的平移定理 | $\tau' = R\tau + p\times Rf$ |
+
+#### 2.2.9 为什么值得接受这套形式
+
+从工业机器人（DH 参数 + 每个连杆单独写 Newton-Euler）转过来，会觉得空间代数增加了
+心智负担。但对人形机器人它是必需的：
+
+1. **递推公式统一**：$\nu_i = \nu_{\lambda(i)} + S_i\dot q_i$，一行覆盖旋转关节、平移
+   关节、球关节、浮动基。DH 参数在球关节和浮动基上直接失效。
+2. **$O(n)$ 复杂度的基础**：RNEA / ABA / CRBA 依赖这套代数的结构——力和速度的对偶让
+   反向递推可以直接用 $\mathrm{Ad}^\top$，无需额外推导。
+3. **质心动力学**：$h_G = A_G(q)\dot q$（CMM 矩阵）本质上就是把所有连杆的空间动量用
+   $\mathrm{Ad}^\top$ 约化到质心，这是人形平衡控制（ZMP / CoM 轨迹 / Capture Point）
+   的数学基础（见 [4.6](#46-质心动量学)）。
+4. **接触约束**：$J\dot q = 0$ 在空间代数下自然表达 6D（面接触 `CONTACT_6D`）或
+   3D（点接触 `CONTACT_3D`）约束，无需分类讨论。
 
 ### 2.3 空间惯量
 
-每个刚体的惯量以 $6\times6$ 矩阵表示：
+空间惯量 $I \in \mathbb{R}^{6\times6}$ 连接空间速度与空间动量：$h = I\,\nu$。
+在以坐标系原点为参考点（质心偏移 $c$）时，按 Pinocchio 的 $[v;\ \omega]$ 顺序：
 
-$$\mathbf{I} = \begin{bmatrix} I_c + m\,\hat{c}\hat{c}^\top & m\hat{c} \\ m\hat{c}^\top & mE \end{bmatrix}$$
+$$I = \begin{bmatrix} m\,\mathbb{1}_3 & -m\hat{c} \\[2pt] m\hat{c} & \bar I_C - m\hat{c}\hat{c} \end{bmatrix}$$
 
-其中 $I_c$ 为质心处惯量张量，$m$ 为质量，$c$ 为质心位置，$\hat{c}$ 为 $c$ 的反对称矩阵
-（使得 $\hat{c}v = c\times v$）。
+其中 $m$ 为质量，$c$ 为质心相对坐标系原点的位置，$\bar I_C$ 为**绕质心**的 $3\times3$
+转动惯量张量，$\hat c$ 为 $c$ 的反对称矩阵（$\hat c\,x = c\times x$）。
 
-空间动量：$\mathbf{h} = \mathbf{I}\,\mathbf{v}$，空间力方程：$\mathbf{f} = \mathbf{I}\,\mathbf{a} + \mathbf{v}\times^*\mathbf{I}\,\mathbf{v}$。
+对应的经典表达式：
+
+$$\underbrace{p_{\text{lin}} = m(v_O + \omega\times c)}_{=\ m\,v_C\text{，质心线动量}},
+\qquad
+\underbrace{L_O = m\,c\times v_O + (\bar I_C - m\hat c\hat c)\,\omega}_{\text{对原点的角动量（含平行轴项）}}$$
+
+这里 $-m\hat c\hat c = m(c^\top c\,\mathbb{1} - c\,c^\top)$ 正是**平行轴定理**
+（Huygens–Steiner）。当 $c = 0$（原点在质心）时，$I$ 退化为对角块形式
+$\mathrm{diag}(m\mathbb{1},\ \bar I_C)$，即回到最熟悉的经典教科书形式。
+
+```cpp
+pinocchio::Inertia Y = model.inertias[i];
+Y.mass()     // m：连杆质量
+Y.lever()    // c：质心相对关节坐标系原点的位置
+Y.inertia()  // Ī_C：绕质心的 3×3 转动惯量
+```
+
+空间力方程（Newton-Euler）：$\phi = I\,a + \nu\times^*(I\,\nu)$，详见
+[2.2.6](#226-运动方程中的-omegatimes-项)。
 
 ---
 
@@ -194,11 +428,141 @@ $${}^0T_i = {}^0T_{p(i)} \cdot {}^{p(i)}T_i(q_i)$$
 pin.forwardKinematics(model, data, q)          # 只更新 data.oMi[]
 pin.forwardKinematics(model, data, q, v)       # 同时计算速度 data.v[]
 pin.forwardKinematics(model, data, q, v, a)    # 同时计算加速度 data.a[]
-pin.framesForwardKinematics(model, data, q)    # 更新 data.oMf[]（Frame 层）
-pin.updateFramePlacement(model, data, frame_id)# 更新单个 Frame
 ```
 
 **复杂度**：$O(n)$，$n$ 为关节数。
+
+#### 4.1.1 Joint 层 vs Frame 层
+
+Pinocchio 的运动学树中**只有关节是计算节点**，上面的递推只填充 `data.oMi[]`。但 URDF
+里你真正关心的对象大多**不是关节**：末端执行器 `tool0`、足底接触点 `LF_FOOT`、相机
+安装座、IMU 位置、连杆本体（Body）。这些都是 **Frame** —— 相对某个父关节的**固定**
+SE(3) 偏移：
+
+$$\underbrace{{}^oM_f}_{\texttt{data.oMf[f]}}
+= \underbrace{{}^oM_{i}}_{\texttt{data.oMi[parentJoint]}}
+\cdot \underbrace{{}^{i}M_f}_{\texttt{model.frames[f].placement}}$$
+
+关键点：**Frame 不引入自由度**，它只是关节坐标系上的一个固定挂载点。因此
+$n_{\text{frames}}$ 通常是 $n_{\text{joints}}$ 的 2 倍以上
+（`buildSampleModelHumanoid()`：30 个关节 vs 70 个 Frame）。
+
+```python
+print(model.njoints, model.nframes)   # 样例人形：30 vs 70
+model.frames[fid].parentJoint         # 该 Frame 挂在哪个关节上
+model.frames[fid].placement           # ᶦM_f，固定偏移，与 q 无关
+model.frames[fid].type                # JOINT / BODY / OP_FRAME / FIXED_JOINT / SENSOR
+```
+
+> ⚠️ 特别注意 `FIXED_JOINT` 类型。URDF 中的固定关节在建模时会被**吸收合并**（不产生
+> `data.oMi` 项），只以 Frame 形式保留。所以 URDF 里很多"关节名"在 Pinocchio 中其实是
+> Frame，必须用 `getFrameId` 而非 `getJointId` 查找。
+
+#### 4.1.2 Frame 位姿更新的三个 API
+
+```python
+pin.framesForwardKinematics(model, data, q)     # FK + 刷新全部 Frame（自包含）
+pin.updateFramePlacements(model, data)          # 仅刷新全部 Frame（复数，需先 FK）
+pin.updateFramePlacement(model, data, frame_id) # 仅刷新单个 Frame（单数，需先 FK）
+```
+
+| 函数 | 内部是否调 FK | 更新范围 | 复杂度 | 前置条件 |
+|------|--------------|----------|--------|----------|
+| `framesForwardKinematics(model, data, q)` | ✅ 是（**仅位姿**） | 全部 Frame | $O(n_j + n_f)$ | 无 |
+| `updateFramePlacements(model, data)` | ❌ 否 | 全部 Frame | $O(n_f)$ | 需先 FK |
+| `updateFramePlacement(model, data, fid)` | ❌ 否 | 单个 Frame | $O(1)$ | 需先 FK |
+
+声明在 [`algorithm/frames.hpp`](include/pinocchio/algorithm/frames.hpp)，实现在
+[`src/algorithm/frames.hxx`](include/pinocchio/src/algorithm/frames.hxx)（注意路径中的
+`src/` 段，这是 Pinocchio 模板库的三层布局约定，见 [11.1](#111-三层文件布局-hpp--hxx--cpp)）。
+
+**`framesForwardKinematics` 是复合操作**（[`frames.hxx:67-68`](include/pinocchio/src/algorithm/frames.hxx#L67-L68)）：
+
+```cpp
+forwardKinematics(model, data, q);    // ← 只算位姿，不算速度/加速度
+updateFramePlacements(model, data);   // ← 遍历所有 frame
+```
+
+**`updateFramePlacement` 本质上只是一次 SE(3) 乘法**（[`frames.hxx:50`](include/pinocchio/src/algorithm/frames.hxx#L50)）：
+
+```cpp
+data.oMf[frame_id] = data.oMi[frame.parentJoint] * frame.placement;
+```
+
+**`updateFramePlacements` 则是对上式的遍历**（[`frames.hxx:30-35`](include/pinocchio/src/algorithm/frames.hxx#L30-L35)），
+循环从索引 1 开始 —— 索引 0 是固定的 `universe` 帧，无需更新。
+
+#### 4.1.3 两个必须避开的陷阱
+
+**陷阱一：`updateFramePlacement` 不调用 FK。**
+它直接读取 `data.oMi[parentJoint]`，假设你已经算好了。若未先调 `forwardKinematics`，
+`data.oMi` 中是上次的旧值或初始值 —— 结果**静默错误**：不报错、不抛异常，只是数值不对。
+这是 Pinocchio 最常见的 bug 来源之一。
+
+```python
+pin.forwardKinematics(model, data, q)                  # 必需的前置步骤
+oMf = pin.updateFramePlacement(model, data, frame_id)  # 再刷这一个
+```
+
+**陷阱二：`framesForwardKinematics` 只填位姿，不填速度。**
+它内部调用的是**只带 `q` 的一元 `forwardKinematics`**，因此 `data.v[]` 和 `data.a[]`
+不会被更新。随后若调用 `getFrameVelocity`，拿到的是陈旧值或零值。需要速度时必须显式
+走两步：
+
+```python
+pin.forwardKinematics(model, data, q, v)   # 三参数版本，填充 data.v[]
+pin.updateFramePlacements(model, data)     # 再刷 Frame 位姿
+vel = pin.getFrameVelocity(model, data, fid, pin.LOCAL_WORLD_ALIGNED)
+```
+
+#### 4.1.4 选用建议
+
+**IK 迭代循环**（每步只关心一个末端 Frame）—— 用单数版，省掉遍历全部 Frame 的开销：
+
+```python
+for i in range(IT_MAX):
+    pin.forwardKinematics(model, data, q)
+    pin.updateFramePlacement(model, data, tool_id)   # O(1)，只刷需要的
+    iMd = data.oMf[tool_id].actInv(oMdes)
+    err = pin.log6(iMd).vector
+    ...
+    q = pin.integrate(model, q, v * DT)
+```
+
+**多接触约束**（如四足的四个足端）—— 一次 FK + 循环刷 4 个 Frame，比全量版本更省：
+
+```python
+pin.forwardKinematics(model, data, q)
+for fid in feet_frame_ids:
+    pin.updateFramePlacement(model, data, fid)
+```
+
+**已调用过其它算法**（`computeJointJacobians`、`crba`、`centerOfMass` 等内部都会跑 FK）
+—— 直接刷 Frame，不要重复 FK：
+
+```python
+pin.computeJointJacobians(model, data, q)    # 内部已含 forwardKinematics
+pin.updateFramePlacement(model, data, fid)   # 直接刷，不重复算
+```
+
+**可视化 / 碰撞检测** —— 交给上层函数，`updateGeometryPlacements` 内部已处理，
+见 [`geometry-models.py`](examples/geometry-models.py)。
+
+#### 4.1.5 配套的 Frame 层 API
+
+这套机制还有若干配套函数，都遵循同样的"需先 FK"约定：
+
+| 函数 | 作用 | 前置条件 |
+|------|------|----------|
+| `getFrameJacobian(model, data, fid, rf)` | Frame 的 $6\times n_v$ Jacobian | `computeJointJacobians` |
+| `computeFrameJacobian(model, data, q, fid, rf)` | 一体化版本（内部含 FK） | 无 |
+| `getFrameVelocity(model, data, fid, rf)` | Frame 空间速度 | `forwardKinematics(m,d,q,v)` |
+| `getFrameAcceleration(model, data, fid, rf)` | 空间加速度（李代数导数） | `forwardKinematics(m,d,q,v,a)` |
+| `getFrameClassicalAcceleration(model, data, fid, rf)` | 经典加速度（含 $\omega\times v$） | 同上 |
+
+参数 `rf` 为参考系枚举，取值与物理含义见 [2.2.7](#227-参考系local--world--local_world_aligned)；
+末端执行器任务通常用 `LOCAL_WORLD_ALIGNED`。最后两行的区别见
+[2.2.5](#225-空间加速度最反直觉的一个)。
 
 ---
 
@@ -206,78 +570,217 @@ pin.updateFramePlacement(model, data, frame_id)# 更新单个 Frame
 
 **目标**：给定末端目标位姿 $T_{des}$，求关节配置 $q$。
 
-**方法**：带阻尼最小二乘的迭代 Jacobian 法（Levenberg-Marquardt 思路）。
+**方法**：带阻尼最小二乘的迭代 Jacobian 法（Levenberg–Marquardt 思路）。
 
-**迭代步骤**：
+#### 4.2.1 为什么误差不能写成"目标减当前"
 
-**①** 计算 SE(3) 误差（在关节局部系下的对数映射）：
+工业机器人里常把误差写成 $e = x_{des} - x$。但位姿属于 $SE(3)$ 流形，减法没有定义：
+两个旋转矩阵相减不再是旋转矩阵。正确做法是用**相对变换的对数映射**：
 
-$$e_k = \log\!\left({}^iT_{des}^{-1}\right) \in \mathbb{R}^6$$
+$${}^iM_{des} = {}^oM_i^{-1}\cdot{}^oM_{des}, \qquad e = \log_6\!\left({}^iM_{des}\right)\in\mathbb{R}^6$$
 
-**②** 计算修正后的几何 Jacobian：
+物理含义：$e$ 是"从当前位姿出发，沿哪个 6D 螺旋运动（旋量）走单位时间能到达目标"。
+当且仅当 ${}^iM_{des} = I$ 时 $e = 0$，因此 $\|e\|\to 0$ 是正确的收敛判据。
 
-$$J_{eff} = -J_{\log_6}\!\left({}^iT_{des}^{-1}\right) \cdot {}^0J_i(q)$$
+代码对应（[`inverse-kinematics.py`](examples/inverse-kinematics.py)）：
 
-其中 $J_{\log_6}$ 是 $SE(3)$ 对数映射关于其参数的 Jacobian（通过 `Jlog6` 获得）。
+```python
+iMd = data.oMi[JOINT_ID].actInv(oMdes)   # ᶦM_des = oMᵢ⁻¹ · oM_des
+err = pin.log6(iMd).vector                # e ∈ R⁶
+```
 
-**③** 阻尼最小二乘求速度：
+#### 4.2.2 关键推导：为什么需要 Jlog6
 
-$$\dot{q} = -J_{eff}^\top \left(J_{eff}J_{eff}^\top + \lambda^2 I_6\right)^{-1} e_k$$
+我们要求的是 $\dfrac{\partial e}{\partial q}$，但 $e = \log_6({}^iM_{des}(q))$ 是 $q$ 的
+**复合函数**，必须用链式法则拆成两段：
 
-阻尼系数 $\lambda$ 防止 Jacobian 奇异时解爆炸。
+$$\frac{\partial e}{\partial q}
+= \underbrace{\frac{\partial \log_6(M)}{\partial M}}_{\text{Jlog6，}6\times6}
+\cdot
+\underbrace{\frac{\partial\, {}^iM_{des}}{\partial q}}_{\text{几何 Jacobian，}6\times n_v}$$
 
-**④** 流形积分更新配置（非普通加法）：
+**第二段**：由 ${}^iM_{des} = {}^oM_i^{-1}\,{}^oM_{des}$，只有 ${}^oM_i$ 依赖 $q$。
+关节 $i$ 的局部速度为 ${}^i\nu_i = {}^iJ_i\,\dot q$，扰动 $q$ 会使 ${}^oM_i$ 右乘
+$\exp(\delta)$，从而使 ${}^iM_{des}$ **左乘** $\exp(-\delta)$ —— 负号由此而来。
 
-$$q_{k+1} = q_k \oplus (\dot{q} \cdot \Delta t)$$
+**第一段**：$\log_6$ 是高度非线性的（含 $\theta/\sin\theta$ 型因子）。若省略 Jlog6 而直接
+用 $J$，等价于假设 $\log$ 是恒等映射 —— 在小误差时近似成立，但大角度误差下会显著拖慢
+收敛甚至发散。合并两段：
 
-**收敛判据**：$\|e_k\|_2 < \varepsilon$（典型值 $10^{-4}$）。
+$$J_{\text{eff}} = -J_{\log_6}\!\left({}^iM_{des}^{-1}\right)\cdot {}^iJ_i(q)$$
+
+> **数值验证**：`Jlog6(M)` 与 $\log_6$ 的有限差分在本仓库实测吻合到 $1.7\times10^{-8}$。
+
+```python
+J = pin.computeJointJacobian(model, data, q, JOINT_ID)  # LOCAL 系
+J = -np.dot(pin.Jlog6(iMd.inverse()), J)
+```
+
+#### 4.2.3 阻尼最小二乘的来历
+
+理想情况下解 $J_{\text{eff}}\,\dot q = -e$。但 $J_{\text{eff}}$ 在奇异位形附近条件数
+极大，纯最小二乘 $\dot q = -J^{+}e$ 会给出爆炸的关节速度。改为求解带正则项的问题：
+
+$$\min_{\dot q}\ \tfrac12\|J_{\text{eff}}\dot q + e\|^2 + \tfrac{\lambda^2}{2}\|\dot q\|^2$$
+
+令梯度为零：$(J^\top J + \lambda^2 I_{n_v})\dot q = -J^\top e$。利用
+**推移恒等式** $(J^\top J+\lambda^2 I_{n_v})^{-1}J^\top = J^\top(JJ^\top+\lambda^2 I_6)^{-1}$
+（右侧只需求逆一个 $6\times6$ 矩阵，而非 $n_v\times n_v$）：
+
+$$\boxed{\dot q = -J_{\text{eff}}^\top\left(J_{\text{eff}}J_{\text{eff}}^\top + \lambda^2 I_6\right)^{-1} e}$$
+
+对人形（$n_v\approx 36$）这个变换把求逆规模从 $36\times36$ 降到 $6\times6$。$\lambda$ 的
+作用是把 $J$ 的奇异值 $\sigma$ 替换为 $\sigma/(\sigma^2+\lambda^2)$：当 $\sigma\gg\lambda$
+时几乎不变，当 $\sigma\to 0$ 时增益被限制在 $1/(2\lambda)$ 而非发散。
+
+#### 4.2.4 流形积分
+
+$$q_{k+1} = q_k \oplus (\dot q\,\Delta t) \equiv \texttt{pin.integrate(model, q, v*DT)}$$
+
+**不能写成 $q \mathrel{+}= \dot q\Delta t$** —— 浮动基的四元数分量会失去单位范数。
+`integrate` 对每种关节类型分别调用其指数映射（见 [2.1](#21-李群-se3)）。
+
+#### 4.2.5 完整算法
+
+| 步骤 | 公式 | API |
+|------|------|-----|
+| ① FK | ${}^oM_i(q)$ | `forwardKinematics` |
+| ② 误差 | $e=\log_6({}^oM_i^{-1}{}^oM_{des})$ | `log6(oMi.actInv(oMdes))` |
+| ③ 判敛 | $\|e\|<\varepsilon$ | 典型 $\varepsilon=10^{-4}$ |
+| ④ Jacobian | $J_{\text{eff}}=-J_{\log_6}\cdot J$ | `Jlog6` + `computeJointJacobian` |
+| ⑤ 阻尼解 | $\dot q=-J^\top(JJ^\top+\lambda^2I)^{-1}e$ | `np.linalg.solve` |
+| ⑥ 积分 | $q\leftarrow q\oplus\dot q\Delta t$ | `integrate` |
+
+**3D 位置版本的简化**：若只约束位置（[`inverse-kinematics-3d.py`](examples/inverse-kinematics-3d.py)），
+误差 $e = {}^iM_{des}.\text{translation}\in\mathbb{R}^3$ 是欧氏量，**无需 Jlog6**，
+且只取 $J$ 的前 3 行。这正是 2.2 节所说"位置是线性的、姿态是流形的"的直接体现。
 
 ---
 
 ### 4.3 逆向动力学 RNEA
 
-**目标**：给定 $(q, \dot{q}, \ddot{q})$，求所需关节力矩 $\tau$。
+**目标**：给定 $(q,\dot q,\ddot q)$，求所需关节力矩 $\tau$。
 
-**方程来源**：多体动力学方程（欧拉-拉格朗日方程）：
+#### 4.3.1 从拉格朗日方程到递推形式
 
-$$M(q)\ddot{q} + C(q,\dot{q})\dot{q} + g(q) = \tau + J_c^\top\lambda$$
+多体系统的运动方程为：
 
-无接触时 $\lambda=0$，RNEA 直接计算右侧 $\tau$。
+$$M(q)\ddot q + \underbrace{C(q,\dot q)\dot q + g(q)}_{\text{非线性项 }n(q,\dot q)} = \tau + J_c^\top\lambda$$
 
-**两趟递推，复杂度 $O(n)$**：
+**朴素思路**是分别构造 $M$、$C$、$g$ 再相加 —— 但构造 $C$ 需要 $O(n^3)$ 的 Christoffel
+符号。RNEA 的洞察是：**如果只需要 $\tau$ 这个结果，根本不必显式构造任何矩阵**，
+沿运动树跑两趟递推即可，复杂度 $O(n)$。
 
-**第一趟（从根到叶，正向）** —— 计算各连杆速度与加速度：
+#### 4.3.2 第一趟：正向传播运动学（根 → 叶）
 
-$$\mathbf{v}_i = {}^iX_{p(i)}\,\mathbf{v}_{p(i)} + \mathbf{s}_i\dot{q}_i$$
+对每个关节 $i$，父关节记 $\lambda(i)$，关节运动子空间记 $S_i$（旋转关节为
+$[0,0,0,\ 0,0,1]^\top$ 之类的常向量）：
 
-$$\mathbf{a}_i = {}^iX_{p(i)}\,\mathbf{a}_{p(i)} + \mathbf{s}_i\ddot{q}_i + \mathbf{v}_i\!\times\!\mathbf{s}_i\dot{q}_i$$
+$$\nu_i = {}^iX_{\lambda(i)}\,\nu_{\lambda(i)} + S_i\dot q_i$$
 
-**第二趟（从叶到根，反向）** —— 计算各连杆受力并向上传递：
+**推导**：连杆 $i$ 的速度 = 父连杆速度（变换到 $i$ 系）+ 关节 $i$ 自身贡献。这就是
+2.2.4 节的伴随变换 ${}^iX_{\lambda(i)} = \mathrm{Ad}_{{}^iM_{\lambda(i)}}$。
 
-$$\mathbf{f}_i = \mathbf{I}_i\mathbf{a}_i + \mathbf{v}_i\!\times^*\!\mathbf{I}_i\mathbf{v}_i - {}^i\mathbf{f}^{ext}_i + \sum_{j\in\text{child}(i)} {}^iX_j^*\,\mathbf{f}_j$$
+对时间求导得加速度。注意 ${}^iX_{\lambda(i)}$ **本身随时间变化**，其导数贡献
+$\nu_i\times(S_i\dot q_i)$：
 
-**投影到关节轴**：
+$$a_i = {}^iX_{\lambda(i)}\,a_{\lambda(i)} + S_i\ddot q_i + \underbrace{\nu_i\times S_i\dot q_i}_{\text{速度积项}}$$
 
-$$\tau_i = \mathbf{s}_i^\top\mathbf{f}_i$$
+最后这项就是**科氏力/离心力的几何来源**——它完全由速度的叉乘产生，不含 $\ddot q$。
 
-其中 $\mathbf{s}_i$ 为关节子空间（旋转关节为 $[0,0,0,0,0,1]^\top$ 等），${}^iX_j$ 为空间坐标变换算子，$\times^*$ 为空间力的伴随（反对称）运算。
+> **重力的技巧**：把根节点的加速度初始化为 $a_0 = -g$（重力加速度取负），重力就自动
+> 通过递推传遍全身，无需单独处理。这是 Featherstone 体系的经典手法。
+
+#### 4.3.3 第二趟：反向传播力（叶 → 根）
+
+对连杆 $i$ 应用 Newton–Euler 方程（见 [2.2.6](#226-运动方程中的-omegatimes-项)）：
+
+$$f_i^{\text{net}} = I_i a_i + \nu_i\times^* (I_i\nu_i)$$
+
+连杆 $i$ 受力平衡：自身惯性力 = 父关节施加的力 − 传给子关节的力 + 外力。故：
+
+$$f_i = I_i a_i + \nu_i\times^*(I_i\nu_i) - {}^if_i^{\text{ext}} + \sum_{j\in\text{child}(i)} {}^iX_j^*\,f_j$$
+
+注意子关节的力用 ${}^iX_j^* = \mathrm{Ad}^\top$ 变换（**余伴随**，见 [2.2.4](#224-坐标变换伴随与余伴随)）
+—— 这正是力与速度对偶性的直接应用。
+
+**投影到关节轴**：关节只能沿其运动子空间施力，其余分量由机械结构承担：
+
+$$\tau_i = S_i^\top f_i$$
+
+这一步是**虚功原理**：$\tau_i\dot q_i = f_i^\top(S_i\dot q_i)$ 对任意 $\dot q_i$ 成立。
+
+#### 4.3.4 由 RNEA 派生的三个常用量
+
+RNEA 是"万能积木"，通过特殊输入可提取动力学方程的各个部分：
+
+| 调用 | 得到 | 原理 |
+|------|------|------|
+| `rnea(m,d,q,0,0)` | $g(q)$ | 令 $\dot q=\ddot q=0$，只剩重力 |
+| `nle(m,d,q,v)` | $C\dot q+g$ | 令 $\ddot q=0$ |
+| `rnea(m,d,q,v,a)` $-$ `nle` | $M(q)\ddot q$ | 差分消去非线性项 |
+
+> **数值验证**（本仓库样例人形，34 DOF）：
+> `tau == M @ a + nle` ✅、`nle(v=0) == g` ✅ 均严格成立。
+
+**复杂度**：$O(n)$，无矩阵求逆，是所有动力学算法中最快的。
 
 ---
 
 ### 4.4 正向动力学 ABA
 
-**目标**：给定 $(q, \dot{q}, \tau)$，求关节加速度 $\ddot{q}$。
+**目标**：给定 $(q,\dot q,\tau)$，求 $\ddot q$。
 
-**原理**：直接求解 $\ddot{q} = M(q)^{-1}(\tau - h(q,\dot{q}))$ 但不显式构造 $M$ 也不做 $O(n^3)$ 矩阵求逆，
-通过三趟 $O(n)$ 递推完成：
+#### 4.4.1 为什么不能直接求逆
 
-**关键量**：关节化体惯量（Articulated Body Inertia）$\mathbf{I}_i^A$，吸收子树贡献：
+形式解是 $\ddot q = M^{-1}(\tau - n(q,\dot q))$，但显式构造 $M$ 需 $O(n^2)$、
+求逆需 $O(n^3)$。ABA 用**三趟 $O(n)$ 递推**得到同样结果。
 
-$$\mathbf{I}_i^A = \mathbf{I}_i + \sum_{j\in\text{child}(i)} {}^iX_j^*\!\left(\mathbf{I}_j^A - \frac{\mathbf{I}_j^A\mathbf{s}_j\mathbf{s}_j^\top\mathbf{I}_j^A}{\mathbf{s}_j^\top\mathbf{I}_j^A\mathbf{s}_j}\right){}^jX_i$$
+#### 4.4.2 核心概念：关节化体惯量
 
-括号内即 Schur 补，等效于"已知子关节会自由响应后"的有效惯量。
+ABA 的关键洞察是引入**关节化体惯量**（Articulated Body Inertia）$I_i^A$：
 
-**三趟**：第一趟正向（速度/偏置力），第二趟反向（$\mathbf{I}^A$、偏置项），第三趟正向（加速度）。
+> $I_i^A$ 回答的问题是：*把以连杆 $i$ 为根的整个子树看作一个整体，当子关节都能
+> **自由响应**（按各自的 $\tau_j$ 加速）时，在连杆 $i$ 上施加空间力 $f$ 会产生多大加速度？*
+
+它满足 $f_i = I_i^A a_i + p_i^A$，其中 $p_i^A$ 是**偏置力**（速度积项与已知 $\tau$ 的贡献）。
+
+与之对比：CRBA 中的复合刚体惯量 $I^c$ 假设子关节**全部锁死**。
+"锁死"对应 $M$，"自由"对应 $M^{-1}$ —— 这是两个算法的本质分野。
+
+#### 4.4.3 递推公式的推导
+
+设已知子关节 $j$ 满足 $f_j = I_j^A a_j + p_j^A$。关节 $j$ 的力矩方程为：
+
+$$\tau_j = S_j^\top f_j = S_j^\top\left(I_j^A a_j + p_j^A\right)$$
+
+代入 $a_j = {}^jX_i\,a_i + S_j\ddot q_j + c_j$（$c_j$ 为速度积项），解出 $\ddot q_j$：
+
+$$\ddot q_j = \underbrace{\left(S_j^\top I_j^A S_j\right)^{-1}}_{\textstyle D_j^{-1}}
+\left[\tau_j - S_j^\top I_j^A\left({}^jX_i a_i + c_j\right) - S_j^\top p_j^A\right]$$
+
+把这个 $\ddot q_j$ **回代**进 $f_j$ 的表达式，消去 $\ddot q_j$ 后整理，得到父连杆看到的
+等效惯量：
+
+$$\boxed{I_i^A = I_i + \sum_{j\in\text{child}(i)} {}^iX_j^*\left(I_j^A - \frac{I_j^A S_j S_j^\top I_j^A}{S_j^\top I_j^A S_j}\right){}^jX_i}$$
+
+括号内是 **Schur 补**。它的物理意义十分直观：从子树的"锁死惯量" $I_j^A$ 中
+**扣除**关节 $j$ 可自由转动的那个方向所释放的惯量。若关节 $j$ 完全刚性
+（$D_j\to\infty$），修正项消失，退化为 CRBA 的复合惯量。
+
+#### 4.4.4 三趟结构
+
+| 趟次 | 方向 | 计算内容 |
+|------|------|----------|
+| ① | 根 → 叶 | $\nu_i$、速度积项 $c_i$（与 RNEA 第一趟同，但无 $\ddot q$） |
+| ② | 叶 → 根 | $I_i^A$、偏置力 $p_i^A$（上面的 Schur 补递推） |
+| ③ | 根 → 叶 | 用已知的 $a_{\lambda(i)}$ 代入上式求 $\ddot q_i$，再求 $a_i$ |
+
+> **数值验证**：`aba(model, data, q, v, rnea(q,v,a)) == a` 严格成立
+> —— ABA 与 RNEA 互为逆运算。
+
+**复杂度**：$O(n)$。对 $n>\!\approx 8$ 的系统快于"CRBA + Cholesky 求解"的 $O(n^3)$ 路线；
+但若同时还需要 $M$ 本身（如 WBC 中的任务空间投影），则后者更划算。
 
 ---
 
@@ -285,13 +788,64 @@ $$\mathbf{I}_i^A = \mathbf{I}_i + \sum_{j\in\text{child}(i)} {}^iX_j^*\!\left(\m
 
 **目标**：计算广义质量矩阵 $M(q)\in\mathbb{R}^{n_v\times n_v}$。
 
-**复合刚体算法（Composite Rigid Body Algorithm）**：
+#### 4.5.1 从动能出发
 
-$$M_{ij} = \mathbf{s}_i^\top\,\mathbf{I}_{\text{subtree}(j)}^c\,\mathbf{s}_j, \quad i \leq j$$
+$M$ 的定义来自系统动能的二次型：
 
-$\mathbf{I}_{\text{subtree}(j)}^c$ 为以 $j$ 为根的子树所有连杆的复合空间惯量，利用运动树的稀疏性只计算上三角。
+$$T = \tfrac12\dot q^\top M(q)\dot q = \sum_i \tfrac12\,\nu_i^\top I_i\,\nu_i$$
 
-$M$ 对称正定，可用 $LDL^\top$ 分解高效求逆，Pinocchio 提供 `cholesky` 模块专门处理。
+代入 $\nu_i = J_i\dot q$（$J_i$ 为连杆 $i$ 的 $6\times n_v$ Jacobian）：
+
+$$M(q) = \sum_i J_i^\top I_i J_i$$
+
+直接按此式计算需 $O(n^2)$ 次 $6\times6$ 运算。CRBA 利用**运动树的稀疏性**降到
+$O(n\,d)$（$d$ 为树深度）。
+
+#### 4.5.2 稀疏性：为什么大量元素恒为零
+
+关键结构性质：
+
+$$M_{ij}\neq 0 \iff \text{关节 }i\text{ 与 }j\text{ 在同一条从根到叶的支链上}$$
+
+**理由**：$M_{ij} = S_i^\top(\cdots)S_j$ 描述关节 $i$ 与 $j$ 的惯性耦合。若二者位于树的
+两条不同分支（如左臂与右臂），则不存在同时被两者驱动的连杆，耦合项为零。
+
+> **数值验证**（样例人形 34 DOF）：遍历全部 $34\times34$ 个元素，
+> **非同支链却非零的元素数 = 0**，稀疏性严格成立。
+
+#### 4.5.3 复合刚体惯量与递推
+
+定义**复合刚体惯量** $I_i^c$ —— 把以 $i$ 为根的整个子树**锁死为单个刚体**后的空间惯量：
+
+$$I_i^c = I_i + \sum_{j\in\text{child}(i)} {}^iX_j^*\,I_j^c\,{}^jX_i$$
+
+叶到根一趟递推即可求出全部 $I_i^c$。有了它，矩阵元为：
+
+$$\boxed{M_{ij} = S_i^\top\,I_i^c\,{}^iX_j\,S_j,\qquad j\in\text{subtree}(i)}$$
+
+> ⚠️ 注意下标：用的是 **$I_i^c$（行索引 $i$ 的复合惯量）**，列 $j$ 遍历 **$i$ 的子树**。
+> 源码 [`crba.hxx`](include/pinocchio/src/algorithm/crba.hxx) 中对应
+> `data.M.block(idx_v(i), idx_v(i), nv(i), nvSubtree[i])` —— 行块 $i$、列跨度恰为
+> $i$ 的子树，与上式一致。
+
+**物理直觉**：$M_{ij}$ = "让关节 $j$ 单位加速时，关节 $i$ 需要提供多少力矩"。由于 $j$ 在
+$i$ 的子树内，$i$ 必须带动**整个子树**，故用锁死后的复合惯量 $I_i^c$。
+
+**复杂度**：$O(n d)$，对人形（$d\approx 6$）远快于朴素的 $O(n^2)$。
+
+#### 4.5.4 性质与后续使用
+
+$M$ 对称正定，故可作 $LDL^\top$ 分解。Pinocchio 的 `cholesky` 模块进一步利用上述稀疏
+模式，分解复杂度亦为 $O(nd)$ 而非稠密的 $O(n^3)$：
+
+```python
+M = pin.crba(model, data, q)          # 上三角计算，返回时已对称化
+pin.cholesky.decompose(model, data)   # 稀疏 LDLᵀ
+pin.cholesky.solve(model, data, rhs)  # 解 M x = rhs
+```
+
+> **实现细节**：算法内部只填充上三角，Python 绑定返回前会补全为对称阵
+> （实测 `crba` 返回值满足 `M == M.T`）。若直接读取 `data.M` 则需自行注意。
 
 ---
 
@@ -299,57 +853,165 @@ $M$ 对称正定，可用 $LDL^\top$ 分解高效求逆，Pinocchio 提供 `chol
 
 这是**人形机器人控制的核心工具**，也是 Pinocchio 区别于其他库的特色之一。
 
-**质心动量矩阵（CMM）** $A_g(q)\in\mathbb{R}^{6\times n_v}$：
+#### 4.6.1 定义：把全身动量约化到质心
 
-$$\mathbf{h}_g = \begin{bmatrix} L_g \\ p \end{bmatrix} = A_g(q)\,\dot{q}$$
+系统总空间动量是各连杆动量之和。将其全部用**余伴随**变换（[2.2.4](#224-坐标变换伴随与余伴随)）
+约化到**以质心 $c$ 为原点、与世界系平行**的坐标系：
 
-$L_g$：相对质心的系统角动量；$p = m\dot{c}$：系统线动量（$m$ 总质量，$c$ 质心）。
+$$h_g = \sum_i {}^gX_i^*\,I_i\,\nu_i
+= \begin{bmatrix} p \\ L_g \end{bmatrix} \in\mathbb{R}^6$$
 
-**整体牛顿-欧拉方程**（人形平衡控制的出发点）：
+其中 $p = m\dot c$ 为总线动量，$L_g$ 为**相对质心**的总角动量。
 
-$$\dot{p} = \sum_k f_k^{contact} + mg$$
+> ⚠️ 顺序仍是**线性在前**（与 [2.2](#22-空间速度与空间力) 一致）：
+> `data.hg.linear` $= p = m\dot c$，`data.hg.angular` $= L_g$。
+> **数值验证**：`hg.linear == mass * vcom` 严格成立。
 
-$$\dot{L}_g = \sum_k (p_k^{contact} - c) \times f_k^{contact} + \sum_k \tau_k^{contact}$$
+由于每个 $\nu_i = J_i\dot q$ 都线性依赖 $\dot q$，总动量也线性依赖 $\dot q$：
 
-这两个方程构成对接触力的线性约束，是 **ZMP 约束**、**接触力可行域（摩擦锥）** 的数学基础，
-也是 MPC 质心轨迹优化的状态方程。
+$$\boxed{h_g = A_g(q)\,\dot q},\qquad A_g(q) = \sum_i {}^gX_i^*\,I_i\,J_i \in\mathbb{R}^{6\times n_v}$$
 
-**API**：
+$A_g$ 称为**质心动量矩阵**（CMM, Centroidal Momentum Matrix）。
+
+> **数值验证**：`hg == Ag @ v` 严格成立；样例人形 $A_g$ 形状 $6\times34$，总质量 15.5 kg。
+
+#### 4.6.2 为什么它是平衡控制的基础
+
+对 $h_g$ 求时间导数，并注意**内力成对抵消**（牛顿第三定律），只剩外力：
+
+$$\dot h_g = \sum_k {}^gX_k^*\,\phi_k^{\text{ext}} + \begin{bmatrix} m\,\mathbf{g} \\ 0 \end{bmatrix}$$
+
+展开成线性/角动量两式，即人形平衡控制的出发点：
+
+$$\dot p = \sum_k f_k^{\text{contact}} + m\mathbf{g}
+\qquad\text{（质心运动只由合外力决定）}$$
+
+$$\dot L_g = \sum_k (p_k^{\text{contact}} - c)\times f_k^{\text{contact}} + \sum_k \tau_k^{\text{contact}}$$
+
+**三条关键推论**：
+
+1. **欠驱动的本质**：$\dot p$ 只能通过接触力改变。关节力矩 $\tau$ 不出现在这两式中
+   —— 人形在腾空相无法改变质心轨迹，这是欠驱动的数学表述。
+2. **ZMP / 支撑多边形**：由于摩擦锥要求 $f_k^z\ge 0$，第二式给出对
+   $\dot L_g$ 的**线性不等式约束**，等价于 ZMP 必须落在支撑多边形内。
+3. **MPC 状态方程**：这两式仅含 $(c,\dot c,L_g)$ 与接触力，构成
+   **低维**（通常 6~9 维）的质心动力学模型，是实时 MPC 可行的关键 —— 无需在 MPC 中
+   处理全部 34 个自由度。
+
+#### 4.6.3 API
 
 ```python
 pin.computeCentroidalMomentum(model, data, q, v)
-# → data.hg        : 质心动量 (6D)
-# → data.dhg       : 质心动量时导数
-# → data.com[0]    : 质心位置
-# → data.vcom[0]   : 质心速度
-# → data.Ag        : 质心动量矩阵 A_g (6 × nv)
+# → data.hg      : 质心动量 h_g (6D, Force 类型：linear=p, angular=L_g)
+# → data.com[0]  : 质心位置 c
+# → data.vcom[0] : 质心速度 ċ
+
+pin.computeCentroidalMap(model, data, q)      # → data.Ag (6 × nv)
+pin.computeCentroidalMomentumTimeVariation(model, data, q, v, a)
+# → data.dhg     : ḣ_g（含 Ȧ_g v 项）
 ```
 
 ---
 
 ### 4.7 接触约束动力学
 
-**目标**：人形足底接触时，在约束下求 $\ddot{q}$ 和接触力 $\lambda$。
+**目标**：人形足底接触时，在约束下同时求 $\ddot q$ 和接触力 $\lambda$。
 
-**最优化形式**：
+#### 4.7.1 约束的三个层次：位置 → 速度 → 加速度
 
-$$\min_{\ddot{q}} \;\tfrac{1}{2}\|\ddot{q} - \ddot{q}_{free}\|_{M(q)}^2 \quad \text{s.t.}\quad J(q)\ddot{q} + \dot{J}(q,\dot{q})\dot{q} = 0$$
+接触的物理约束写在**位置**层面：接触点不能穿透也不能滑移，即 $c(q) = 0$。
+但动力学方程是关于 $\ddot q$ 的，因此需连续求导两次：
 
-等价于求解 KKT（鞍点）系统：
+$$c(q) = 0
+\ \xrightarrow{\ \frac{d}{dt}\ }\ \underbrace{J(q)\dot q = 0}_{J \,\equiv\, \partial c/\partial q}
+\ \xrightarrow{\ \frac{d}{dt}\ }\ J\ddot q + \dot J\dot q = 0$$
 
-$$\begin{bmatrix} M & J^\top \\ J & 0 \end{bmatrix} \begin{bmatrix} \ddot{q} \\ \lambda \end{bmatrix} = \begin{bmatrix} \tau - C\dot{q} - g \\ -\dot{J}\dot{q} \end{bmatrix}$$
+**只有最后一式能直接进入动力学方程**。记 $\gamma = \dot J\dot q$（接触点的漂移加速度，
+即 2.2 节的速度积项），约束为 $J\ddot q = -\gamma$。
 
-$\lambda\in\mathbb{R}^{n_c}$ 即接触力（Lagrange 乘子），$J$ 为接触约束 Jacobian。
+#### 4.7.2 从 Gauss 最小约束原理导出 KKT
 
-**高效求解**：Pinocchio 利用 **Contact Cholesky Decomposition** 充分利用运动树稀疏性，
-比朴素高斯消元快数倍（具体实现见 `contact-cholesky.hpp`）。
+**Gauss 最小约束原理**指出：受约束系统的真实加速度，是在所有满足约束的加速度中，
+使其与"自由加速度"的 $M$-加权距离最小者：
 
-**约束类型**：
+$$\min_{\ddot q}\ \tfrac12\left\|\ddot q - \ddot q_{\text{free}}\right\|_{M}^2
+\quad\text{s.t.}\quad J\ddot q = -\gamma$$
 
-| `ContactType` | 含义 | $n_c$ per contact |
-|---------------|------|-------------------|
-| `CONTACT_3D`  | 3D 点接触（位置约束）| 3 |
-| `CONTACT_6D`  | 6D 面接触（SE(3) 约束）| 6 |
+其中 $\ddot q_{\text{free}} = M^{-1}(\tau - n)$ 为无约束时的加速度。构造 Lagrange 函数：
+
+$$\mathcal{L} = \tfrac12(\ddot q - \ddot q_{\text{free}})^\top M(\ddot q - \ddot q_{\text{free}})
+- \lambda^\top(J\ddot q + \gamma)$$
+
+$$\frac{\partial\mathcal{L}}{\partial\ddot q} = M\ddot q - M\ddot q_{\text{free}} - J^\top\lambda = 0
+\ \Longrightarrow\ M\ddot q + n = \tau + J^\top\lambda$$
+
+与约束式联立，得 **KKT 鞍点系统**：
+
+$$\boxed{\begin{bmatrix} M & J^\top \\ J & 0\end{bmatrix}
+\begin{bmatrix}\ddot q\\ -\lambda\end{bmatrix}
+= \begin{bmatrix}\tau - n\\ \gamma\end{bmatrix}}$$
+
+**$\lambda$ 的物理意义**：Lagrange 乘子恰为**接触力**，$J^\top\lambda$ 是它映射到关节
+空间的等效力矩。这不是巧合 —— 乘子的量纲由约束的量纲决定，而 $J^\top$ 正是
+2.2.4 节的余伴随（力的变换）。
+
+> **数值验证**（样例人形 + CONTACT_6D）：`constraintDynamics` 返回的 $(\ddot q,\lambda)$
+> 代入 $M\ddot q + n - \tau - J^\top\lambda$ 的残差为 $1.7\times10^{-13}$。
+> 注意 $J\ddot q \neq 0$（实测 0.108）—— 因为约束是 $J\ddot q = -\gamma$ 而非 $J\ddot q=0$。
+
+#### 4.7.3 Delassus 矩阵与求解
+
+对 KKT 系统作块消元（第一行解出 $\ddot q$ 代入第二行）：
+
+$$\underbrace{\left(J M^{-1} J^\top\right)}_{\textstyle \Lambda^{-1}\ \text{（Delassus 矩阵）}}\lambda
+= J M^{-1}(\tau - n) + \gamma$$
+
+$\Lambda^{-1} = JM^{-1}J^\top\in\mathbb{R}^{n_c\times n_c}$ 称为 **Delassus 算子**，
+其逆 $\Lambda$ 为**操作空间惯量矩阵**：
+
+- $\Lambda^{-1}$：接触空间的"柔度"—— 单位接触力引起多大接触点加速度
+- $\Lambda$：接触空间的"有效惯量"—— 产生单位接触加速度需多大力
+
+**Pinocchio 的高效实现**不走上述稠密消元，而用 **Contact Cholesky 分解**直接对
+$(n_v+n_c)$ 维 KKT 矩阵作稀疏 $LDL^\top$，充分利用运动树结构：
+
+| 方法 | 复杂度 |
+|------|--------|
+| 稠密 LU/LDLᵀ | $O((n_v+n_c)^3)$ |
+| Contact Cholesky | $O(n_v d + n_c^2 n_v)$ |
+
+```python
+pin.initConstraintDynamics(model, data, contact_models)   # 预分配稀疏结构
+a = pin.constraintDynamics(model, data, q, v, tau, contact_models, contact_datas)
+lam = data.lambda_c                                        # 接触力
+# 也可直接取 Delassus：
+data.contact_chol.getInverseOperationalSpaceInertiaMatrix()  # Λ⁻¹ = J M⁻¹ Jᵀ
+```
+
+完整用例见 [`contact-cholesky.py`](examples/contact-cholesky.py) 与
+[`simulation-contact-dynamics.py`](examples/simulation-contact-dynamics.py)。
+
+#### 4.7.4 约束类型与 Baumgarte 稳定化
+
+| `ContactType` | 含义 | 每个接触的 $n_c$ |
+|---------------|------|------------------|
+| `CONTACT_3D`  | 3D 点接触（仅位置）| 3 |
+| `CONTACT_6D`  | 6D 面接触（完整 SE(3)）| 6 |
+
+**数值漂移问题**：我们求解的是二阶导约束 $J\ddot q = -\gamma$，积分两次后 $c(q)=0$ 只在
+理论上保持。浮点误差会随时间累积，使接触点缓慢穿透或漂离。解决方法是在右端加
+**PD 修正项**（Baumgarte 稳定化）：
+
+$$J\ddot q = -\gamma - K_p\,c(q) - K_d\,J\dot q$$
+
+这使约束违反量按二阶系统衰减，取 $K_d = 2\sqrt{K_p}$ 为临界阻尼（无超调）：
+
+```python
+constraint_model.corrector.Kp[:] = 10
+constraint_model.corrector.Kd[:] = 2.0 * np.sqrt(constraint_model.corrector.Kp)
+```
+
+见 [`simulation-closed-kinematic-chains.py`](examples/simulation-closed-kinematic-chains.py)。
 
 ---
 
@@ -358,17 +1020,92 @@ $\lambda\in\mathbb{R}^{n_c}$ 即接触力（Lagrange 乘子），$J$ 为接触�
 Pinocchio 提供所有主要算法的**解析偏导数**，这是 DDP/iLQR 等轨迹优化算法高效运行的基础。
 相比数值差分，解析梯度更精确（不依赖步长选择）且通常快 10 倍以上。
 
-**RNEA 梯度**（轨迹优化中 $\partial \tau / \partial (q,\dot{q},\ddot{q})$）：
+#### 4.8.1 RNEA 梯度
 
-$$\frac{\partial\tau}{\partial q},\quad \frac{\partial\tau}{\partial\dot{q}},\quad \frac{\partial\tau}{\partial\ddot{q}} = M(q)$$
+对 $\tau = M(q)\ddot q + n(q,\dot q)$ 求偏导：
 
-**ABA 梯度**（动力学线性化，DDP 中的 $A_k, B_k$ 矩阵）：
+$$\frac{\partial\tau}{\partial q},\qquad
+\frac{\partial\tau}{\partial\dot q},\qquad
+\frac{\partial\tau}{\partial\ddot q} = M(q)$$
 
-$$\frac{\partial\ddot{q}}{\partial q} = A_k,\quad \frac{\partial\ddot{q}}{\partial\dot{q}},\quad \frac{\partial\ddot{q}}{\partial\tau} = M(q)^{-1} = B_k$$
+第三个等式是**精确恒等式**：$\tau$ 关于 $\ddot q$ 是线性的，系数矩阵正是 $M$。
+这提供了一个免费的 $M$ 计算途径。
 
-**运动学梯度**（用于 Frame 速度/加速度对 $q, \dot{q}$ 的 Jacobian，WBC 必需）：
+```python
+pin.computeRNEADerivatives(model, data, q, v, a)
+data.dtau_dq, data.dtau_dv, data.M    # ← 从 data 读取
+```
 
-$$\frac{\partial v_i}{\partial q},\quad \frac{\partial a_i}{\partial q},\quad \frac{\partial a_i}{\partial\dot{q}},\quad \frac{\partial a_i}{\partial\ddot{q}}$$
+> ⚠️ **务必从 `data` 字段读取**，而非依赖 Python 绑定的返回值顺序。
+> **数值验证**：`data.dtau_dq` / `data.dtau_dv` 与有限差分吻合到 $10^{-7}$；
+> `dtau_da == M` 严格成立。
+
+#### 4.8.2 ABA 梯度与链式法则
+
+ABA 梯度可由 RNEA 梯度推出。对恒等式 $\tau = M\ddot q + n$ 关于 $x\in\{q,\dot q\}$
+求全微分，注意此时 $\ddot q$ 是 $x$ 的函数而 $\tau$ 固定：
+
+$$0 = \frac{\partial\tau}{\partial x}\bigg|_{\ddot q\ \text{固定}} + M\,\frac{\partial\ddot q}{\partial x}
+\ \Longrightarrow\
+\boxed{\frac{\partial\ddot q}{\partial x} = -M^{-1}\frac{\partial\tau}{\partial x}}$$
+
+关键前提：右侧的 $\partial\tau/\partial x$ 必须在 **ABA 解出的那个 $\ddot q$** 处求值。
+
+$$\frac{\partial\ddot q}{\partial\tau} = M(q)^{-1}$$
+
+> **数值验证**：在样例机械臂与人形上，
+> `ddq_dq == -Minv @ dtau_dq` 与 `ddq_dv == -Minv @ dtau_dv` 均成立（$10^{-6}$ 容差）。
+
+```python
+pin.computeABADerivatives(model, data, q, v, tau)
+data.ddq_dq, data.ddq_dv, data.Minv
+```
+
+> ⚠️ **`data.Minv` 只填充上三角！** 这是文档明确声明的行为
+> （[`aba-derivatives.hpp:154`](include/pinocchio/algorithm/aba-derivatives.hpp#L154)），
+> 实测下三角确为残留值。直接拿它做矩阵乘法会得到错误结果，须先对称化：
+> ```python
+> Minv = np.triu(data.Minv) + np.triu(data.Minv, 1).T
+> ```
+
+#### 4.8.3 与 DDP 的状态空间矩阵的关系
+
+DDP/iLQR 需要离散状态转移的线性化 $\delta x_{k+1} = A_k\delta x_k + B_k\delta u_k$。
+以 $x = (q,\dot q)$、$u=\tau$、半隐式欧拉积分为例：
+
+$$A_k = \begin{bmatrix}
+I + \Delta t^2\,\partial\ddot q/\partial q & \Delta t\left(I + \Delta t\,\partial\ddot q/\partial\dot q\right)\\[2pt]
+\Delta t\,\partial\ddot q/\partial q & I + \Delta t\,\partial\ddot q/\partial\dot q
+\end{bmatrix},
+\qquad
+B_k = \begin{bmatrix}\Delta t^2 M^{-1}\\ \Delta t\,M^{-1}\end{bmatrix}$$
+
+> ⚠️ 常见误解：$\partial\ddot q/\partial q$ **本身不是** $A_k$，$M^{-1}$ 本身也不是 $B_k$。
+> 它们只是构成 $A_k,B_k$ 的**分块**，还需按积分格式组装（上式对应半隐式欧拉；
+> 显式欧拉的组装方式不同）。此外浮动基情形下 $q$ 的扰动须在李代数上取，
+> $I$ 需替换为对应的 $\partial\,\text{integrate}/\partial q$ 项。
+
+#### 4.8.4 运动学梯度
+
+用于 Frame 速度/加速度对 $(q,\dot q)$ 的偏导，WBC 与 Frame 空间 MPC 必需：
+
+$$\frac{\partial\nu_i}{\partial q},\quad
+\frac{\partial a_i}{\partial q},\quad
+\frac{\partial a_i}{\partial\dot q},\quad
+\frac{\partial a_i}{\partial\ddot q}$$
+
+两个恒等式值得记住（见 [`kinematics-derivatives.cpp`](examples/kinematics-derivatives.cpp)）：
+
+$$\frac{\partial\nu_i}{\partial\dot q} = \frac{\partial a_i}{\partial\ddot q} = J_i(q)$$
+
+即"速度对速度"与"加速度对加速度"的偏导都等于几何 Jacobian。正因二者相同，
+`getJointAccelerationDerivatives` 不单独返回 $\partial\nu_i/\partial\dot q$。
+
+```python
+pin.computeForwardKinematicsDerivatives(model, data, q, v, a)
+pin.getJointVelocityDerivatives(model, data, jid, pin.LOCAL)
+pin.getJointAccelerationDerivatives(model, data, jid, pin.LOCAL)
+```
 
 ---
 
@@ -1826,8 +2563,8 @@ pinocchio/
 │   │
 │   ├── spatial/                  # ★ 空间代数（数学地基，最先读）
 │   │   ├── se3.hpp               #   SE3Tpl：刚体位姿 R,p + act/actInv
-│   │   ├── motion.hpp            #   MotionTpl：空间速度 Twist (ω,v)
-│   │   ├── force.hpp             #   ForceTpl：空间力 Wrench (τ,f)
+│   │   ├── motion.hpp            #   MotionTpl：空间速度 Twist (v,ω) 线性在前
+│   │   ├── force.hpp             #   ForceTpl：空间力 Wrench (f,τ) 线性在前
 │   │   ├── inertia.hpp           #   InertiaTpl：6×6 空间惯量
 │   │   └── explog.hpp            #   log3/exp3/log6/exp6/Jlog6（李群映射）
 │   │
