@@ -2817,6 +2817,18 @@ pinocchio/
 
 Pinocchio 是一个"模板元编程 + 零成本抽象"的库。不先理解下面三个机制，直接看实现会寸步难行。
 
+> 🔬 **本章配有可运行实验**：[`doc/architecture-tutorial/`](doc/architecture-tutorial/)
+>
+> ```bash
+> cd doc/architecture-tutorial
+> make run        # 三个机制各跑一遍，看实际输出
+> make break-01   # 故意改坏代码，观察三层布局失效时的报错
+> ```
+>
+> 光读本章容易停留在字面。实验里你会**亲手复刻一遍 `forwardKinematics`**
+> 并与官方实现逐关节比对（实测吻合到 $8.4\times10^{-16}$）——
+> 做完就掌握了写 Pinocchio 算法的全部套路。下文每节末尾都有对应实验的入口。
+
 ### 11.1 三层文件布局 .hpp / .hxx / .cpp
 
 同一个算法被拆到**三个文件**，各司其职：
@@ -2862,7 +2874,8 @@ template<typename Scalar> Scalar square(Scalar x);   // 只声明
 template<typename Scalar> Scalar square(Scalar x) { return x * x; }  // 模板定义
 
 // ---------- square.cpp（实例化层，对应 src/algorithm/*.cpp）----------
-#include "square.hpp"
+#include "square.hxx"                      // 编"库"时必须看得见定义体
+template<typename Scalar> Scalar square(Scalar x);   // 声明
 template double square<double>(double);   // 对 double 显式实例化，编进 .o/.so
 
 // ---------- main.cpp（你的项目）----------
@@ -2874,13 +2887,21 @@ int main() {
 }
 ```
 
-**三个可自己动手验证的现象**：
+**三个可自己动手验证的现象**（已在 [`doc/architecture-tutorial/`](doc/architecture-tutorial/)
+中做成可运行实验，`make break-01` 一键复现）：
 
-1. 把 `square.hpp` 末尾的 `#include "square.hxx"` 删掉 → `square(3.0f)` **链接报错**
-   `undefined reference to float square<float>(float)`。**这解释了为什么每个 `.hpp` 末尾都要
-   include 对应 `.hxx`**：不这样，非默认标量就没有可见定义。
-2. `square(3.0)`（double）即使删掉 `.hxx` 也能链接 —— 因为 `square.cpp` 已经预实例化了 double 版。
+1. 把 `square.hpp` 末尾的 `#include "square.hxx"` 删掉 → `square(3.0f)` **链接报错**：
+   ```
+   undefined reference to `float square<float>(float)'
+   undefined reference to `long double square<long double>(long double)'
+   ```
+   **这解释了为什么每个 `.hpp` 末尾都要 include 对应 `.hxx`**：不这样，非默认标量就没有可见定义。
+2. 同一次编译中，`square(3.0)`（double）**依然链接成功** —— 因为 `square.cpp` 已预实例化 double 版。
    **这正是 `libpinocchio.so` 的作用**：帮你把最常用的 double 版本编好，省掉重复编译。
+   > ⚠️ 注意上面 `square.cpp` 里 include 的是 **`.hxx` 而非 `.hpp`**。若它只 include `.hpp`，
+   > 那么删掉 `.hpp` 末尾那行后，`square.cpp` 自己也会因"看不到定义体"而编译失败，
+   > 就演示不出"double 可用、float 失败"的对比了。真实仓库中 `.cpp` 经由
+   > `.hpp → .hxx` 的链条拿到定义，效果等同。
 3. 对照真实文件：`kinematics.hpp` 末尾的 `#include ".../kinematics.hxx"`、
    `kinematics.cpp` 里的 `template ... forwardKinematics<context::Scalar,...>` 就是上面②③的真身。
 
@@ -2900,6 +2921,10 @@ grep -n "forwardKinematics" src/algorithm/kinematics.cpp
 > **记牢这条路径差异**：`include/pinocchio/algorithm/xxx.hpp`（声明）↔
 > `include/pinocchio/src/algorithm/xxx.hxx`（实现）。很多人只在 `algorithm/` 里翻，找不到实现体，
 > 就是因为漏了中间的 `src/`。
+
+> 🔬 **动手验证**：`cd doc/architecture-tutorial && make run-01 && make break-01`
+> —— 前者跑通正常流程，后者故意注释掉 `.hxx` 的 include，让你亲眼看到
+> "double 正常、float 链接失败"的对比。
 
 ### 11.2 Tpl 模板 + context 默认标量
 
@@ -3098,6 +3123,12 @@ int main() {
 > **Python 侧提醒**：`pinocchio.Model` 只暴露 `double` 版；`float` / autodiff / codegen 这些
 > 非默认标量的能力**只在 C++ 层可用**（见 [§13](#13-python-绑定如何映射到-c)）。
 
+> 🔬 **动手验证**：`cd doc/architecture-tutorial && make run-02`
+> —— 用 `static_assert` 在编译期证明 `Model == ModelTpl<context::Scalar, context::Options>`，
+> 再用**同一份 `rnea()`** 分别以 `double` 和 `long double` 跑一遍。实测两者差异
+> $4.4\times10^{-15}$（与 double 机器精度 $2.2\times10^{-16}$ 同量级），直观说明
+> "换标量不改算法"是真的成立。
+
 ### 11.3 CRTP + Boost.Fusion 访问者
 
 这是整个库最核心、也最难的机制。**问题**：`forwardKinematics` 要遍历运动树，对每个关节调用
@@ -3266,6 +3297,11 @@ int main()
 
 **你已经掌握了写 Pinocchio 算法的全部套路**：把上面 `algo()` 里的打印换成"计算 `oMi`"，
 就是 `forwardKinematics`；换成"计算受力并反向传递"，就是 RNEA 的一个 Step。**所有内置算法都是这个模式。**
+
+> 🔬 **动手验证**：`cd doc/architecture-tutorial && make run-03`
+> —— 实验 3 就把上面这句话**做成了代码**：先用只读访问者遍历打印，再把 `algo()` 换成
+> FK 递推三行，最后与官方 `forwardKinematics` 逐关节比对。实测
+> $\max\|\log_6({}^oM_{\text{mine}}^{-1}\,{}^oM_{\text{ref}})\| = 8.35\times10^{-16}$，完全一致。
 
 #### 为什么用 CRTP + Variant，而不是普通虚函数？
 
