@@ -3056,13 +3056,18 @@ typename CastType<NewScalar, ModelTpl<...>>::type ModelTpl<...>::cast() const
 （`SE3`、`Inertia`、Eigen 向量、关节参数）才 `.template cast<NewScalar>()`。因为整棵类型树都是模板，
 `ModelTpl<NewScalar>` 的所有成员类型都能自动重新实例化——这就是"换个 `Scalar` 就能重造一个模型"的实现根据。
 
-#### autodiff / 解析梯度：cast 到"会记账的标量"
+#### autodiff（自动微分）：cast 到"会记账的标量"
 
 把 `NewScalar` 换成 `CppAD::AD<double>` 或 `casadi::SX` 这类**会自动记录运算图的标量**后，
 你照常调用 `rnea(model_ad, data_ad, q_ad, ...)`——算法一行没改，但每步 `+ - * /` 都被这些标量
-记进了计算图，结束后即可对图求导。**这就是 Pinocchio "解析/自动梯度"的底层实现**：
+记进了计算图，跑一遍后即可对图求导。**这就是 Pinocchio 自动微分（AD）的底层实现**：
 不是为梯度单独写代码，而是**让同一套算法在"会求导的数系"上跑一遍**。所以 `autodiff/` 目录本质只是
-"提供这些特殊标量 + 对应的实例化"，算法逻辑全部复用第 4 章那套。
+"提供这些特殊标量 + 补齐它们的 traits/数学函数 + 对应实例化"，算法逻辑全部复用第 4 章那套。
+
+> **注意区分"自动微分"与"解析梯度"**：库里 `computeRNEADerivatives` / `computeABADerivatives`
+> （`*-derivatives.hxx`）是**手写推导的闭式导数**，更快，是 DDP 等实时优化的主力；上面的 AD 路线则是
+> **通用机制**——对任意算法都能求导，主要用于**验证**手写解析导数、以及经 CasADi 导出 C 代码。二者互补，
+> 解析梯度并非由 AD 生成。**深入实现与 `static-if` 可微分支机制见 [doc/源码解析.md 条目 3](doc/源码解析.md)。**
 
 > **读源码技巧**：看到冗长签名 `template<typename Scalar, int Options, template<typename,int> class JointCollectionTpl>`
 > 时，心里把 `Scalar`→`double`、`ModelTpl<...>`→`Model` 一替换，signature 立刻清爽。反过来，
@@ -3196,32 +3201,113 @@ RNEA（`rnea.hxx`）就有两个 Step（`Pass1` 正向、`Pass2` 反向），和
 严格对应；ABA（`aba.hxx`）有三个 Step，对应 [4.4](#44-正向动力学-aba) 的三趟。**公式 ↔ Step 一一对应**，
 这是本指南第 4 章能直接当"实现导读"用的原因。
 
-#### 分派链路：`run` 一次调用到底发生了什么
+#### 分派链路：`run` 一次调用到底发生了什么（逐行解析）
 
-`ForwardKinematicZeroStep::run(model.joints[i], ...)` 里 `model.joints[i]` 是一个
-`JointModelVariant`（Boost.Variant，运行时可能是 RX/RY/FreeFlyer…任意一种）。`run` 如何在
-**不用虚函数**的前提下跳到正确的 `algo()`？看 [joint-unary-visitor.hxx:49](include/pinocchio/src/multibody/visitor/joint-unary-visitor.hxx#L49)：
+这是整个访问者机制最"魔法"的一跳。我们把 `ForwardKinematicZeroStep::run(model.joints[i], data.joints[i], args)`
+这一次调用**拆成 5 步**，逐行追到底。源码见
+[joint-unary-visitor.hxx](include/pinocchio/src/multibody/visitor/joint-unary-visitor.hxx)。
+
+**第 0 步：先认清 `jmodel` / `jdata` 到底是什么类型**
+
+- `model.joints[i]` 的类型是 `JointModelTpl<...>`，它**继承自** `JointCollection::JointModelVariant`
+  ——即一个 `boost::variant<JointModelRX, JointModelRY, JointModelFreeFlyer, …>`（见 [§11.4](#114-第三个模板参数-jointcollectiontpl关节类型目录)）。
+  所以 `jmodel` **本身就是一个 variant**，此刻内部装着某一种具体关节（比如 `JointModelRX`）。
+- `data.joints[i]`（`JointDataTpl<...>`）同理，是 `JointDataVariant`，装着与之匹配的 `JointDataRX`。
+- **不变量**：`model.joints[i]` 和 `data.joints[i]` 永远装**配对**的类型（RX 配 RX 的 data）。这是后面
+  `boost::get` 能成功的前提。
+
+**第 1 步：`run` 造一个"内部访问者"再交给 `apply_visitor`**（[L49-59](include/pinocchio/src/multibody/visitor/joint-unary-visitor.hxx#L49)）
 
 ```cpp
-static ReturnType run(const JointModelTpl<...> & jmodel,      // variant
+static ReturnType run(const JointModelTpl<...> & jmodel,   // 一个 variant
                       JointDataTpl<...> & jdata, ArgsTmp args)
 {
-  InternalVisitorModelAndData<...> visitor(jdata, args);
-  return boost::apply_visitor(visitor, jmodel);   // ← 关键：变体分派
+  InternalVisitorModelAndData<JointModel, JointData, ArgsTmp> visitor(jdata, args); // 把 jdata、args 打包进函子
+  return boost::apply_visitor(visitor, jmodel);            // ← 关键的变体分派
 }
 ```
 
-```
-run(jmodel, jdata, args)
-   └─ boost::apply_visitor(visitor, jmodel)
-        └─ Boost 根据 jmodel 当前"真实类型"（如 JointModelRX），
-           在【编译期已生成的】分支表里选中对应实体
-              └─ 调你写的 algo<JointModelRX>(jmodel, jdata, ...)
-                    └─ jmodel.calc(jdata, q)  → 进入 joint-revolute.hxx 的 calc()
+注意：`run` 把 `jdata` 和 `args` 先**塞进 `visitor` 这个函子对象**里带着走（因为 `apply_visitor` 只肯
+按 `jmodel` 一个 variant 分派，其余东西必须"搭车"进函子）。
+
+**第 2 步：`apply_visitor` 按 `jmodel` 的真实类型选分支**
+
+`boost::apply_visitor(visitor, jmodel)` 干的事，等价于一个**编译期自动生成的 switch**：
+
+```cpp
+switch (jmodel.which()) {   // which() = variant 当前装的是第几种类型（运行时一个整数）
+  case 0: return visitor( get<JointModelRX>(jmodel) );          // 调 visitor.operator()(JointModelRX&)
+  case 1: return visitor( get<JointModelRY>(jmodel) );
+  case 2: return visitor( get<JointModelFreeFlyer>(jmodel) );
+  ...  // 对 variant 里每一种关节类型都生成一个 case
+}
 ```
 
-**要点**：`apply_visitor` 对 variant 里**每一种**可能的关节类型都在编译期生成了一个 `algo` 实例，
-运行时只是"选分支"，没有虚表查找。这就是"零成本抽象"——写起来像多态，跑起来像手写的 switch。
+- 这些 `case` 是编译器为 variant 里**每一种**类型生成的，运行时只是按 `which()` 跳表，**没有虚表查找、可内联**。
+- 于是控制权进入 `visitor` 的 `operator()`，且**参数已经是具体类型**（`JointModelRX&`，不再是 variant）。
+
+**第 3 步：`InternalVisitorModelAndData::operator()` —— 真正的"拼参数 + 调 algo"**（[L229-239](include/pinocchio/src/multibody/visitor/joint-unary-visitor.hxx#L229)）
+
+这就是你选中的 `InternalVisitorModelAndData`。它继承 `boost::static_visitor<ReturnType>`（当函子用），
+核心是这段：
+
+```cpp
+template<typename JointModelDerived>                                  // 由第 2 步的分支自动特化成 JointModelRX
+ReturnType operator()(const JointModelBase<JointModelDerived> & jmodel) const
+{
+  // ① 推出与这种 JointModel 配对的 JointData 类型（并把 const 传染过去）
+  typedef typename helper::add_const_if_const<
+    JointData, typename JointModelBase<JointModelDerived>::JointDataDerived>::type  JointDataDerived;
+
+  // ② 从 jdata 这个 variant 里取出配对的那份具体 data（JointDataRX），再把三样东西拼成实参调 algo
+  return bf::invoke(
+    &JointVisitorDerived::template algo<JointModelDerived>,           // 要调的函数：你写的 algo<JointModelRX>
+    bf::append(                                                       // 拼成参数序列：
+      boost::ref(jmodel.derived()),                                  //   [ jmodel(具体),
+      boost::ref(boost::get<JointDataDerived>(jdata)),               //     jdata(具体, 从 variant 取出),
+      args));                                                        //     ...args 展开 ]
+}
+```
+
+逐块看：
+| 代码 | 作用 |
+|------|------|
+| `JointModelBase<JointModelDerived>::JointDataDerived` | 每种关节 Model 都在自己的 traits 里声明"我配对的 Data 类型"。RX → `JointDataRX` |
+| `add_const_if_const<...>` | 若 `jdata` 是 `const`（只读算法），把 const 传染给取出的 data 类型，保证常量正确性 |
+| `boost::get<JointDataDerived>(jdata)` | 从 `data.joints[i]` 这个 variant 里**取出**配对的具体 `JointDataRX&`。第 0 步的"配对不变量"保证它不抛异常 |
+| `bf::append(jmodel, jdata, args)` | 用 **Boost.Fusion**（[§11.3 技巧 C](#113-crtp--boostfusion-访问者)）把 `[jmodel, jdata]` 拼到 `args` 前面，组成完整参数序列 |
+| `&JointVisitorDerived::template algo<JointModelDerived>` | 取你那个访问者（**CRTP**：`JointVisitorDerived` 就是 `ForwardKinematicZeroStep` 自己）的 `algo` 静态成员，且用 `JointModelRX` 实例化 |
+| `bf::invoke(f, seq)` | 把序列 `seq` 展开成实参喂给 `f`，等价于 `algo<JointModelRX>(jmodel, jdata, model, data, q)` |
+
+**第 4 步：落到你写的 `algo()`，再落到关节自己的 `calc()`**
+
+```cpp
+algo<JointModelRX>(jmodel, jdata, model, data, q)     // 你在 §11.3 骨架里写的那段
+  └─ jmodel.calc(jdata, q)                            // 进入 joint-revolute.hxx 的 calc()（见下节）
+```
+
+**整条链路一图**：
+
+```
+ForwardKinematicZeroStep::run(model.joints[i], data.joints[i], args)
+  │  jmodel/jdata 是 variant，各装配对的具体类型
+  ▼  ①把 jdata,args 塞进函子
+InternalVisitorModelAndData visitor(jdata, args)
+  ▼  ②boost::apply_visitor 按 which() 跳表（编译期生成的 switch，无虚表）
+visitor.operator()( 具体的 JointModelRX& )
+  │  ③ add_const_if_const 推出 JointDataRX 类型
+  │     boost::get<JointDataRX>(jdata) 取出配对 data
+  │     bf::append 拼参数 → bf::invoke 展开调用
+  ▼  （CRTP 决定调谁 · Variant 决定用哪种类型 · Fusion 决定拼哪些参数）
+ForwardKinematicZeroStep::algo<JointModelRX>(jmodel, jdata, model, data, q)
+  ▼  ④
+jmodel.calc(jdata, q)  →  joint-revolute.hxx: JointDataRX 的 M 被填成绕 X 轴转 q 的 SE3
+```
+
+**要点回顾**：三个技巧在这一跳里各就各位——
+**Variant**（第 2 步）负责"用哪种关节类型实例化"，**CRTP**（第 3 步 `JointVisitorDerived::algo`）负责
+"调到你写的哪个 `algo`"，**Fusion**（第 3 步 `append`/`invoke`）负责"把哪些参数拼进去"。
+全程是编译期生成的跳表 + 内联，**没有一次虚函数调用**——这就是"写起来像多态、跑起来像手写 switch"的零成本抽象。
 
 #### `jmodel.calc()` 里究竟算了什么（以旋转关节为例）
 
