@@ -25,6 +25,29 @@ namespace pinocchio
    *
    * @tparam     Derived  { description }
    */
+  // ============================================================
+  // ForceBase：空间力（Wrench）的【CRTP 接口层】
+  //
+  //   φ = [f; τ_O] ∈ R⁶ ≅ se*(3)   ★ Pinocchio 采用【线性在前】
+  //     f   = linear()  ：合力（与约化点无关）
+  //     τ_O = angular() ：对【坐标系原点】的合力矩（随原点变化！）
+  //
+  // 力系约化：一组力 {f_k}（作用点 P_k）等效到原点 O：
+  //     f = Σ f_k ,  τ_O = Σ OP_k × f_k
+  //
+  // ⚠️ 常见误解：angular() 不是"纯力偶"，它包含
+  //    真正的力偶 + 合力对原点的力矩臂效应。换原点时它会变：
+  //        τ_C = τ_O − c × f     （c 为新原点相对旧原点的位置）
+  //
+  // 与 Motion 的对偶关系（本文件存在的根本原因）：
+  //   功率 P = φᵀν = f·v + τ·ω 是标量，且与坐标系选择【无关】。
+  //   正因功率必须不变，当速度按伴随 Ad 变换时，力必须按
+  //   余伴随 Ad⁻ᵀ 变换 —— 这就是"力生活在速度的对偶空间 se*(3)"的含义。
+  //   推导见 PINOCCHIO_GUIDE.md §2.2.2 / §2.2.3。
+  //
+  // 类层次与 Motion 完全平行：
+  //   ForceBase → ForceDense → ForceTpl / ForceRef
+  // ============================================================
   template<class Derived>
   class ForceBase : NumericalBase<Derived>
   {
@@ -50,6 +73,7 @@ namespace pinocchio
      *
      * @return     The 3D vector associated to the angular part of the 6D force vector
      */
+    // 力矩 τ_O：对【坐标系原点】而言。⚠️ 换原点时该值会变（见类头说明）
     ConstAngularType angular() const
     {
       return derived().angular_impl();
@@ -60,6 +84,7 @@ namespace pinocchio
      *
      * @return     The 3D vector associated to the linear part of the 6D force vector
      */
+    // 合力 f：与约化点无关，是刚体受力的固有属性
     ConstLinearType linear() const
     {
       return derived().linear_impl();
@@ -231,6 +256,10 @@ namespace pinocchio
 
     /** \return the dot product of *this with m     *
      */
+    // ---- 与速度的对偶配对：功率 P = φᵀν = f·v + τ·ω ----
+    // 标量，且【与坐标系选择无关】（实测变换前后残差 8.3e-17）。
+    // 这正是 Force 与 Motion 互为对偶空间的定义性质，
+    // 也是虚功原理 τ_joint = Sᵀf（RNEA 投影步骤）的依据
     template<typename MotionDerived>
     Scalar dot(const MotionDense<MotionDerived> & m) const
     {
@@ -249,6 +278,11 @@ namespace pinocchio
      *
      * @return     an expression of the force expressed in the new coordinates
      */
+    // ---- 坐标变换：力用【余伴随】Ad_M⁻ᵀ（注意不是伴随 Ad_M！）----
+    //   ᴮf = R·ᴬf                ← 合力只旋转
+    //   ᴮτ = R·ᴬτ + t × (R·ᴬf)   ← 力矩加力矩臂效应（经典的"力的平移定理"）
+    // 与 Motion::se3Action 对比：t× 项作用在【力】上而非角速度上，
+    // 这是伴随矩阵转置的直接结果（见 §2.2.4）
     template<typename S2, int O2>
     typename SE3GroupAction<Derived>::ReturnType se3Action(const SE3Tpl<S2, O2> & m) const
     {
@@ -273,6 +307,9 @@ namespace pinocchio
       return derived().se3ActionInverse_impl(m);
     }
 
+    // ---- 被速度叉乘作用：ν ×* φ（对偶叉乘）----
+    // 由 Motion::cross(Force) 经双分派调用到这里。
+    // RNEA 中连杆受力递推的 ν ×* (Iν) 项即由此计算（见 §4.3.3）
     template<typename M1>
     typename MotionAlgebraAction<Derived, M1>::ReturnType
     motionAction(const MotionDense<M1> & v) const

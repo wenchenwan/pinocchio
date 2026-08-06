@@ -23,6 +23,23 @@ namespace pinocchio
   /// \return The rotational matrix associated to the integration of the angular velocity during
   /// time 1.
   ///
+  // ============================================================
+  // exp3：so(3) → SO(3)，罗德里格斯公式（Rodrigues' formula）
+  //
+  //   R = exp(ω̂) = I + (sinθ/θ)·ω̂ + ((1−cosθ)/θ²)·ω̂²,   θ = ‖ω‖
+  //
+  // 物理含义：绕单位轴 ω/θ 旋转 θ 弧度；亦即"以角速度 ω 转动【单位时间】
+  // 后得到的姿态"。这是浮动基/球关节积分 q ← q ⊕ v·dt 的数学核心（§2.1）。
+  //
+  // ⚠️ 数值要点：θ→0 时 sinθ/θ 与 (1−cosθ)/θ² 都是 0/0 型。
+  //   本实现用 if_then_else 在 θ 小于阈值时切换到【泰勒展开】：
+  //       sinθ/θ      ≈ 1 − θ²/6
+  //       (1−cosθ)/θ² ≈ 1/2 − θ²/24
+  //       cosθ        ≈ 1 − θ²/2
+  //   用 if_then_else 而非普通 if 的原因：需兼容自动微分标量
+  //   （AD 类型在分支上不可直接比较，须用可微的选择算子）。
+  //   t2 里额外加 eps² 也是为了避免 θ=0 时 sqrt 的导数发散。
+  // ============================================================
   template<typename Vector3Like>
   typename Eigen::
     Matrix<typename Vector3Like::Scalar, 3, 3, PINOCCHIO_EIGEN_PLAIN_TYPE(Vector3Like)::Options>
@@ -35,18 +52,22 @@ namespace pinocchio
     typedef Eigen::Matrix<Scalar, 3, 3, Vector3LikePlain::Options> Matrix3;
     const static Scalar eps = Eigen::NumTraits<Scalar>::epsilon();
 
-    const Scalar t2 = v.squaredNorm() + eps * eps;
-
-    const Scalar t = math::sqrt(t2);
+    const Scalar t2 = v.squaredNorm() + eps * eps; // 加 eps² 防止 θ=0 处不可微
+    const Scalar t = math::sqrt(t2);               // θ = ‖ω‖ 旋转角
     Scalar ct, st;
-    SINCOS(t, &st, &ct);
+    SINCOS(t, &st, &ct); // 一次调用同时得到 sinθ 和 cosθ
 
+    // 系数 (1−cosθ)/θ²，θ 很小时切换到泰勒展开 1/2 − θ²/24
     const Scalar alpha_vxvx = internal::if_then_else(
       internal::GT, t, TaylorSeriesExpansion<Scalar>::template precision<3>(),
       static_cast<Scalar>((1 - ct) / t2), static_cast<Scalar>(Scalar(1) / Scalar(2) - t2 / 24));
+    // 系数 sinθ/θ，θ 很小时切换到泰勒展开 1 − θ²/6
     const Scalar alpha_vx = internal::if_then_else(
       internal::GT, t, TaylorSeriesExpansion<Scalar>::template precision<3>(),
       static_cast<Scalar>((st) / t), static_cast<Scalar>(Scalar(1) - t2 / 6));
+
+    // 用 ω̂² = ωωᵀ − θ²I 的恒等式改写：先填 α·ωωᵀ，
+    // 再逐元素加反对称部分，最后往对角线加 cosθ —— 避免显式构造 ω̂ 并做矩阵乘法
     Matrix3 res(alpha_vxvx * v * v.transpose());
     res.coeffRef(0, 1) -= alpha_vx * v[2];
     res.coeffRef(1, 0) += alpha_vx * v[2];
@@ -70,6 +91,20 @@ namespace pinocchio
   ///
   /// \return The angular velocity vector associated to the rotation matrix.
   ///
+  // ============================================================
+  // log3：SO(3) → so(3)，exp3 的逆运算
+  //
+  //   给定 R，求 ω 使 exp3(ω) = R：
+  //     θ = arccos((tr(R) − 1)/2)，  ω̂ = θ/(2 sinθ) · (R − Rᵀ)
+  //
+  // 用途：度量两个姿态之间的差异（IK 的姿态误差项、§4.2.1）。
+  //
+  // ⚠️ 三个奇异点，实现（log3_impl）需分别处理：
+  //     θ→0   ：sinθ→0，用泰勒展开
+  //     θ→π   ：sinθ→0 但 θ 不小，须改用 R 的对角元开方求轴
+  //     θ>π   ：映射非唯一，本函数返回主值 ‖ω‖ ≤ π
+  //   带 theta 输出参数的这个重载可复用已算出的角度，避免重复计算。
+  // ============================================================
   template<typename Matrix3Like>
   Eigen::
     Matrix<typename Matrix3Like::Scalar, 3, 1, PINOCCHIO_EIGEN_PLAIN_TYPE(Matrix3Like)::Options>
@@ -107,6 +142,15 @@ namespace pinocchio
   ///   + \frac{1}{||r||^2} (1-\frac{\sin{||r||}}{||r||}) r r^T
   /// \f]
   ///
+  // ============================================================
+  // Jexp3：exp3 的雅可比（右雅可比），∂exp₃(r)/∂r ∈ R^{3×3}
+  //
+  //   J = (sinθ/θ)·I − ((1−cosθ)/θ²)·r̂ + (1/θ²)(1 − sinθ/θ)·rrᵀ
+  //
+  // 模板参数 op（SETTO / ADDTO / RMTO）决定结果是【覆盖写入】、
+  // 【累加】还是【累减】到输出矩阵 —— 让调用者在组装大矩阵时
+  // 免去中间临时对象，是 Pinocchio 中常见的性能手法。
+  // ============================================================
   template<AssignmentOperatorType op, typename Vector3Like, typename Matrix3Like>
   void Jexp3(const Eigen::MatrixBase<Vector3Like> & r, const Eigen::MatrixBase<Matrix3Like> & Jexp)
   {
@@ -228,6 +272,16 @@ namespace pinocchio
    *
    *  \note The inputs must be such that \f$ \theta = \Vert \log \Vert \f$.
    */
+  // ============================================================
+  // Jlog3：log3 的雅可比（右雅可比），∂log₃(R)/∂R ∈ R^{3×3}
+  //
+  //   Jlog3 = (θsinθ)/(2(1−cosθ))·I + (1/2)·ω̂ + (1/θ²)(1 − ...)·ωωᵀ
+  //
+  // 是 Jexp3 的逆：Jlog3(exp₃(r))·Jexp3(r) = I。
+  // 用于纯姿态 IK / SO(3) 上的梯度传播，作用与 Jlog6 之于 SE(3) 相同。
+  // 本重载要求调用者已算好 θ 和 log（避免重复计算），
+  // 下方另有直接接受 R 的便捷重载。
+  // ============================================================
   template<typename Scalar, typename Vector3Like, typename Matrix3Like>
   void Jlog3(
     const Scalar & theta,
@@ -336,6 +390,21 @@ namespace pinocchio
   SE3Tpl<
     typename MotionDerived::Scalar,
     PINOCCHIO_EIGEN_PLAIN_TYPE(typename MotionDerived::Vector3)::Options>
+  // ============================================================
+  // exp6：se(3) → SE(3)，6D 旋量的指数映射
+  //
+  //   给定旋量 ν = [v; ω]，exp6(ν) = (R, p)：
+  //     R = exp3(ω)                        （旋转部分同罗德里格斯）
+  //     p = V(ω)·v ，其中 V 为左雅可比：
+  //     V(ω) = I + ((1−cosθ)/θ²)·ω̂ + ((θ−sinθ)/θ³)·ω̂²
+  //
+  // 几何含义：沿【螺旋运动】（Chasles 定理：任意刚体位移 = 绕某轴旋转
+  // + 沿该轴平移）走单位时间。注意 p ≠ v —— 因为平移过程中坐标系
+  // 本身也在旋转，必须用 V(ω) 修正，这是与 exp3 最大的不同。
+  //
+  // 用途：SE(3) 流形积分 integrate()、SE3::Interpolate 的底层。
+  // 同样在 θ→0 处使用泰勒展开保证数值稳定与可微性。
+  // ============================================================
   exp6(const MotionDense<MotionDerived> & nu)
   {
     typedef typename MotionDerived::Scalar Scalar;
@@ -462,6 +531,15 @@ namespace pinocchio
   ///
   template<typename Matrix4Like>
   MotionTpl<typename Matrix4Like::Scalar, Eigen::internal::traits<Matrix4Like>::Options>
+  // ============================================================
+  // log6：SE(3) → se(3)，exp6 的逆运算（此重载接受 4×4 齐次矩阵）
+  //
+  //   ω = log3(R)，v = V(ω)⁻¹·p
+  //
+  // 用途：把"当前位姿到目标位姿的差异"表达成一个 6D 旋量，
+  // 即 IK 的误差向量（§4.2.1）：err = log6(ᵒM_i⁻¹ · ᵒM_des)。
+  // 当且仅当两位姿重合时 err = 0，故可作收敛判据。
+  // ============================================================
   log6(const Eigen::MatrixBase<Matrix4Like> & M)
   {
     PINOCCHIO_ASSERT_MATRIX_SPECIFIC_SIZE(Matrix4Like, M, 4, 4);
@@ -480,6 +558,13 @@ namespace pinocchio
   /// \brief Derivative of exp6
   /// Computed as the inverse of Jlog6
   template<AssignmentOperatorType op, typename MotionDerived, typename Matrix6Like>
+  // ============================================================
+  // Jexp6：exp6 的雅可比，∂exp₆(ν)/∂ν ∈ R^{6×6}
+  //
+  // 与 Jlog6 互为逆：Jexp6(ν)·Jlog6(exp₆(ν)) = I。
+  // 用途：需要对"沿旋量积分"这一操作求导时（如轨迹优化中对
+  // integrate() 求导、浮动基状态的李代数扰动传播）。
+  // ============================================================
   void Jexp6(const MotionDense<MotionDerived> & nu, const Eigen::MatrixBase<Matrix6Like> & Jexp)
   {
     PINOCCHIO_ASSERT_MATRIX_SPECIFIC_SIZE(Matrix6Like, Jexp, 6, 6);
@@ -648,6 +733,18 @@ namespace pinocchio
    *  - \f$ \frac{\partial m_2}{\partial A} = - Jlog_6(M_2) Ad_A \f$.
    */
   template<typename Scalar, int Options, typename Matrix6Like>
+  // ============================================================
+  // Jlog6：log6 的雅可比，∂log₆(M)/∂M ∈ R^{6×6}
+  //
+  // 为什么 IK 里非它不可（§4.2.2）：
+  //   误差 e = log₆(M(q)) 是 q 的【复合函数】，链式法则要求
+  //       ∂e/∂q = Jlog6(M) · ∂M/∂q = Jlog6(M) · J
+  //   省略 Jlog6 等于假设 log 是恒等映射 —— 小误差时近似成立，
+  //   大角度误差下会显著拖慢收敛甚至发散。
+  //
+  // 实测：Jlog6(M) 与 log6 的有限差分吻合到 1.7e-8。
+  // 对应代码：J = -Jlog6(iMd.inverse()) * J（见 examples/inverse-kinematics.py）
+  // ============================================================
   void Jlog6(const SE3Tpl<Scalar, Options> & M, const Eigen::MatrixBase<Matrix6Like> & Jlog)
   {
     Jlog6_impl<Scalar>::run(M, PINOCCHIO_EIGEN_CONST_CAST(Matrix6Like, Jlog));

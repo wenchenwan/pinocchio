@@ -29,6 +29,22 @@ namespace pinocchio
   /// at the same Frame.
   ///
   template<typename Motion1, typename Motion2, typename Vector3Like>
+  // ============================================================
+  // classicAcceleration：空间加速度 → 【经典】加速度
+  //
+  //   a_classic = a_spatial.linear() + ω × v
+  //
+  // 为什么需要转换（见 PINOCCHIO_GUIDE.md §2.2.5）：
+  //   空间加速度是空间速度的【逐分量时间导数】 dν/dt，
+  //   而经典加速度是物质点位置的二阶导 d²p/dt²。
+  //   两者相差一个 ω × v 项 —— 这是最反直觉的一点：
+  //   a.linear() 既不是质心加速度，也不是原点物质点的加速度。
+  //
+  // 什么时候必须用经典加速度：
+  //   · 与 IMU/加速度计读数对比（传感器测的是经典加速度）
+  //   · 接触点的实际加速度约束
+  //   · 与传统机器人学教材的公式对照
+  // ============================================================
   inline void classicAcceleration(
     const MotionDense<Motion1> & spatial_velocity,
     const MotionDense<Motion2> & spatial_acceleration,

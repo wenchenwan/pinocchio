@@ -60,10 +60,14 @@ namespace pinocchio
     using Base::__plus__;
 
     // Constructors
+    // ---- 默认构造：m_data【未初始化】（Eigen 默认不清零）----
+    // 需要零运动请用 MotionTpl::Zero()
     MotionTpl()
     {
     }
 
+    // ---- 由 (线速度 v, 角速度 ω) 两段 3D 向量构造 ----
+    // ⚠️ 参数顺序是【线性在前】，与 Featherstone 原书相反，容易写反
     template<typename V1, typename V2>
     MotionTpl(const Eigen::MatrixBase<V1> & v, const Eigen::MatrixBase<V2> & w)
     {
@@ -73,6 +77,8 @@ namespace pinocchio
       angular() = w;
     }
 
+    // ---- 由单个 6D 向量 [v; ω] 构造 ----
+    // explicit：避免 Vector6 意外隐式转成 Motion
     template<typename V6>
     explicit MotionTpl(const Eigen::MatrixBase<V6> & v)
     : m_data(v)
@@ -85,12 +91,15 @@ namespace pinocchio
       *this = other;
     }
 
+    // ---- 跨标量类型构造（如 MotionTpl<float> → MotionTpl<double>）----
+    // 与 SE3Tpl 不同：Motion 是线性空间，cast 后无需重新归一化
     template<typename S2, int O2>
     explicit MotionTpl(const MotionTpl<S2, O2> & other)
     {
       *this = other.template cast<Scalar>();
     }
 
+    // ---- 同标量、不同 Eigen 对齐选项之间的转换 ----
     template<int O2>
     explicit MotionTpl(const MotionTpl<Scalar, O2> & clone)
     : m_data(clone.toVector())
@@ -131,6 +140,8 @@ namespace pinocchio
     }
 
     // initializers
+    // ---- 零运动 ν = 0 ----
+    // 注：若在编译期就知道是零，用 MotionZero 更优（运算可被完全优化掉）
     static MotionTpl Zero()
     {
       return MotionTpl(Vector6::Zero());
@@ -140,11 +151,13 @@ namespace pinocchio
       return MotionTpl(Vector6::Random());
     }
 
+    // 本类已是"朴素"类型，plain() 直接返回自身
     inline PlainReturnType plain() const
     {
       return *this;
     }
 
+    // ---- 底层 6D 向量：返回引用，零拷贝 ----
     ToVectorConstReturnType toVector_impl() const
     {
       return m_data;
@@ -155,13 +168,15 @@ namespace pinocchio
     }
 
     // Getters
+    // ---- 分量访问：对同一段 m_data 取【视图】(segment)，不复制数据 ----
+    // 这就是为什么 v.linear() 可作左值：它是引用而非拷贝
     ConstAngularType angular_impl() const
     {
-      return m_data.template segment<3>(ANGULAR);
+      return m_data.template segment<3>(ANGULAR); // 下标 3..5
     }
     ConstLinearType linear_impl() const
     {
-      return m_data.template segment<3>(LINEAR);
+      return m_data.template segment<3>(LINEAR); // 下标 0..2
     }
     AngularType angular_impl()
     {
@@ -186,6 +201,15 @@ namespace pinocchio
     }
 
     // Specific operators for MotionTpl and MotionRef
+    // ============================================================
+    // 针对 MotionTpl / MotionRef 的【专用运算重载】
+    //
+    // 为什么要覆盖 MotionDense 里已有的通用版本：
+    //   通用版逐段操作 linear() 和 angular()（两次 3D 运算）；
+    //   这里两者内存连续，可直接对整个 6D 向量 m_data 一次性运算 ——
+    //   更利于 SIMD 向量化，也少一次函数调用。
+    // 每个运算都有 MotionTpl 和 MotionRef 两个重载（后者内存可能不连续）。
+    // ============================================================
     template<int O2>
     MotionPlain __plus__(const MotionTpl<Scalar, O2> & v) const
     {
@@ -244,12 +268,17 @@ namespace pinocchio
       return MotionPlain(alpha * m_data);
     }
 
+    // ---- 返回指向自身数据的轻量引用视图（不拷贝）----
+    // 用途：把本对象的内存交给需要 MotionRef 接口的算法就地修改
     MotionRef<Vector6> ref()
     {
       return MotionRef<Vector6>(m_data);
     }
 
     /// \returns An expression of *this with the Scalar type casted to NewScalar.
+    // ---- 标量类型转换 ----
+    // 与 SE3Tpl::cast 的区别：Motion 属于线性空间 se(3)，没有
+    // "必须留在流形上"的约束，因此转换后无需归一化处理
     template<typename NewScalar>
     MotionTpl<NewScalar, Options> cast() const
     {
@@ -261,12 +290,16 @@ namespace pinocchio
     ///
     /// \brief Returns the size of the MotionTpl object in bytes.
     ///
+    // double 情形：6 个标量 × 8 字节 = 48 字节
     static constexpr std::size_t sizeInBytes()
     {
       return sizeof(MotionTpl);
     }
 
   protected:
+    // ---- 数据成员：单个连续的 6D 向量 [v(0:3); ω(3:6)] ----
+    // 存成一整块（而非两个 Vector3）是为了 toVector() 能零拷贝返回，
+    // 且整体运算可被 SIMD 向量化
     Vector6 m_data;
 
   }; // class MotionTpl

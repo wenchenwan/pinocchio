@@ -22,6 +22,19 @@ namespace pinocchio
     typedef typename MotionDerived::MotionPlain ReturnType;
   };
 
+  // ============================================================
+  // SpatialAxis<axis>：编译期已知的【6D 单位旋量轴】
+  //
+  //   axis 0,1,2 → 平移轴 (e₀,0)、(e₁,0)、(e₂,0)
+  //   axis 3,4,5 → 旋转轴 (0,e₀)、(0,e₁)、(0,e₂)
+  // 内部用 CartesianAxis<axis % 3> 复用 3D 轴的零成本运算。
+  //
+  // 用途：单自由度关节的【运动子空间 S】。
+  //   例如 JointModelRZ 的 S = SpatialAxis<5>，
+  //   于是 ν = S·q̇ 退化成"把 q̇ 写进第 5 个分量"，
+  //   τ = Sᵀf 退化成"取出 f 的第 5 个分量" —— 全部无乘法。
+  // 这正是 Pinocchio 中 RNEA/ABA 递推能极快的微观原因之一。
+  // ============================================================
   template<int _axis>
   struct SpatialAxis //: MotionBase< SpatialAxis<_axis> >
   {

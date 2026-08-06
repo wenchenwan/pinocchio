@@ -26,6 +26,21 @@ namespace pinocchio
     ///
     template<typename Vector3Like, typename QuaternionLike>
     void
+    // ============================================================
+    // quaternion 命名空间：以【四元数】为载体的指数/对数映射
+    //
+    // 与 explog.hxx 中同名函数的区别：那里输出 3×3 旋转矩阵，
+    // 这里输出/输入单位四元数。
+    //
+    // 为什么需要四元数版本：
+    //   · Pinocchio 的浮动基与球关节在配置向量 q 里【就是用四元数存的】
+    //     （nq 比 nv 多 1 的原因），积分时直接操作四元数最自然；
+    //   · 存 4 个数而非 9 个，且归一化只需除以模长（矩阵则要正交化）；
+    //   · 数值上更稳定，反复积分不易累积非正交误差。
+    //
+    //   exp3(ω) → 四元数 q = (sin(θ/2)·ω/θ, cos(θ/2))，θ = ‖ω‖
+    //   注意是【半角】—— 四元数对 SO(3) 是双覆盖（q 与 −q 表示同一旋转）
+    // ============================================================
     exp3(const Eigen::MatrixBase<Vector3Like> & v, Eigen::QuaternionBase<QuaternionLike> & quat_out)
     {
       EIGEN_STATIC_ASSERT_VECTOR_ONLY(Vector3Like);

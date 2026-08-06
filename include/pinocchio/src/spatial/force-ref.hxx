@@ -53,6 +53,13 @@ namespace pinocchio
   };
 
   template<typename Vector6ArgType>
+  // ============================================================
+  // ForceRef：把【外部已有的 6D 内存】当作 Force 操作的视图类
+  //
+  // 不拥有数据、不分配内存，只持有一个 Eigen::Ref。
+  // 典型用途：Data 中的外力数组按列切片，零拷贝地当作 Force 读写。
+  // ⚠️ 不延长被引用内存的生命周期，源数据释放后视图即悬空。
+  // ============================================================
   class ForceRef : public ForceDense<ForceRef<Vector6ArgType>>
   {
   public:
@@ -156,6 +163,7 @@ namespace pinocchio
   }; // traits ForceRef<const Vector6ArgType>
 
   template<typename Vector6ArgType>
+  // ---- 只读视图的偏特化：引用 const 内存，不提供就地修改运算 ----
   class ForceRef<const Vector6ArgType> : public ForceDense<ForceRef<const Vector6ArgType>>
   {
   public:

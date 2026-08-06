@@ -27,6 +27,15 @@ namespace pinocchio
     typedef typename MotionAlgebraAction<Derived, MotionDerived>::ReturnType ReturnType;
   };
 
+  // ============================================================
+  // ForceDense：稠密存储 Force 的【通用实现层】
+  //
+  // 结构与 MotionDense 完全平行：
+  //   ForceBase（纯接口）→ ForceDense（本类，实现所有 _impl）
+  //                      → ForceTpl（自有内存）/ ForceRef（引用外部内存）
+  //
+  // 只依赖派生类提供 linear()/angular() 访问器，其余算法统一在此实现。
+  // ============================================================
   template<typename Derived>
   class ForceDense : public ForceBase<Derived>
   {
@@ -181,6 +190,18 @@ namespace pinocchio
       return phi.linear().dot(linear()) + phi.angular().dot(angular());
     }
 
+    // ---- 对偶叉乘 ν ×* φ（力的李代数作用）----
+    //
+    //   (ν ×* φ).f = ω × f
+    //   (ν ×* φ).τ = ω × τ + v × f
+    //
+    // 与运动叉乘 ν₁ × ν₂ 的结构对比（注意交叉项的位置不同）：
+    //   运动：(.v = v₁×ω₂ + ω₁×v₂ , .ω = ω₁×ω₂)
+    //   力  ：(.f = ω×f           , .τ = ω×τ + v×f)
+    // 这个差异正是 ad* = −adᵀ 的体现。
+    //
+    // 这是 RNEA 反向递推中陀螺/科氏项 ν ×* (Iν) 的计算核心（§4.3.3），
+    // 也是一切离心力、科氏力的最终来源。
     template<typename M1, typename M2>
     void motionAction(const MotionDense<M1> & v, ForceDense<M2> & fout) const
     {
@@ -219,6 +240,11 @@ namespace pinocchio
     }
 
     template<typename S2, int O2, typename D2>
+    // ---- 坐标变换（余伴随 Ad⁻ᵀ）：ᴮφ = ᴮX*_A · ᴬφ ----
+    //   ᴮf = R·ᴬf
+    //   ᴮτ = R·ᴬτ + t × (R·ᴬf)   ← 力的平移定理
+    // 实现要点：先算好 f.linear()，再在第三行【复用】它做叉乘，
+    //   省去一次 R·f 乘法（与 Motion::se3Action_impl 的手法对称）
     void se3Action_impl(const SE3Tpl<S2, O2> & m, ForceDense<D2> & f) const
     {
       f.linear().noalias() = m.rotation() * linear();
@@ -235,6 +261,11 @@ namespace pinocchio
     }
 
     template<typename S2, int O2, typename D2>
+    // ---- 逆变换：ᴬφ = (ᴮX*_A)⁻¹ · ᴮφ ----
+    //   ᴬf = Rᵀ·ᴮf
+    //   ᴬτ = Rᵀ(ᴮτ − t × ᴮf)
+    // 注意用的是【原始】的 linear() 而非已写入的 f.linear()，
+    // 以保证 f 与 *this 为同一对象时结果依然正确
     void se3ActionInverse_impl(const SE3Tpl<S2, O2> & m, ForceDense<D2> & f) const
     {
       f.linear().noalias() = m.rotation().transpose() * linear();

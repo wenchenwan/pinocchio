@@ -23,6 +23,21 @@ namespace pinocchio
   /// \param[out] M the skew matrix representation of dimension 3x3.
   ///
   template<typename Vector3, typename Matrix3>
+  // ============================================================
+  // skew：向量 → 反对称矩阵（hat 算子），叉乘的矩阵化
+  //
+  //         [  0  −v₂   v₁ ]
+  //   v̂  =  [  v₂   0  −v₀ ]     满足  v̂·x = v × x  对任意 x
+  //         [ −v₁  v₀    0 ]
+  //
+  // 它是 so(3) 李代数的矩阵表示：3D 向量 ↔ 3×3 反对称阵一一对应。
+  // 整个 spatial 模块中，凡出现叉乘的地方（伴随矩阵的 t̂R、
+  // 惯量的平行轴项 −m·ĉ·ĉ、ad 算子的 ω̂）都基于它。
+  //
+  // 注意：实际热点代码里往往【不】构造 v̂ 再做矩阵乘法
+  // （那是 9 次乘法），而是直接写叉乘（6 次乘 3 次减）——
+  // 参见 SE3Tpl::toActionMatrix_impl 的逐列 cross 写法。
+  // ============================================================
   inline void skew(const Eigen::MatrixBase<Vector3> & v, const Eigen::MatrixBase<Matrix3> & M)
   {
     PINOCCHIO_EIGEN_STATIC_ASSERT_VECTOR_SPECIFIC_SIZE_OR_DYNAMIC(Vector3, 3);
@@ -94,6 +109,10 @@ namespace pinocchio
   /// \param[out] v the 3d vector representation of M.
   ///
   template<typename Matrix3, typename Vector3>
+  // ---- unSkew：skew 的逆运算，从反对称矩阵取回向量 ----
+  // v = [M(2,1), M(0,2), M(1,0)]（取下三角三个元素）
+  // 若输入并非严格反对称，本实现取反对称部分 (M − Mᵀ)/2 对应的向量
+  // 用途：从 log3 中间结果、或惯量矩阵的耦合块中提取质心向量等
   inline void unSkew(const Eigen::MatrixBase<Matrix3> & M, const Eigen::MatrixBase<Vector3> & v)
   {
     typedef typename Vector3::RealScalar Scalar;
@@ -183,6 +202,9 @@ namespace pinocchio
   /// \param[out] C the skew square matrix representation of dimension 3x3.
   ///
   template<typename V1, typename V2, typename Matrix3>
+  // ---- skewSquare：直接计算 v̂·ŵ，不显式构造两个反对称阵 ----
+  // 利用恒等式 v̂·ŵ = wvᵀ − (vᵀw)·I，把两次矩阵乘法降为一次外积
+  // 惯量的平行轴项 −m·ĉ·ĉ 即由此高效算出
   inline void skewSquare(
     const Eigen::MatrixBase<V1> & u,
     const Eigen::MatrixBase<V2> & v,

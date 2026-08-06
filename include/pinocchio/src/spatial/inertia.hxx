@@ -41,11 +41,33 @@
 
 namespace pinocchio
 {
+  // ============================================================
+  // InertiaBase：空间惯量的【CRTP 接口层】
+  //
+  // 空间惯量 I ∈ R^{6×6} 连接空间速度与空间动量：h = I·ν
+  // 即"从 se(3) 到其对偶 se*(3) 的线性映射"。
+  //
+  // 【关键】：不存 6×6 矩阵，只存三个物理参数（共 10 个自由度）：
+  //     m  = mass()    ：质量（1 个）
+  //     c  = lever()   ：质心相对坐标系原点的位置（3 个）
+  //     Ī_C= inertia() ：绕【质心】的 3×3 对称转动惯量（6 个）
+  //
+  // 由这三者按需展开成 6×6（按 Pinocchio 的 [v; ω] 顺序）：
+  //     I = [ m·1₃    −m·ĉ           ]
+  //         [ m·ĉ     Ī_C − m·ĉ·ĉ    ]
+  // 其中 −m·ĉ·ĉ = m(cᵀc·1 − c·cᵀ) 正是【平行轴定理】(Huygens–Steiner)。
+  // 当 c = 0（原点在质心）时退化为 diag(m·1₃, Ī_C)，即教科书形式。
+  //
+  // 存 10 个参数而非 36 个的好处：省内存、变换更快，且这 10 个正是
+  // 惯量参数辨识（system identification）中的待辨识量。
+  // 详见 PINOCCHIO_GUIDE.md §2.3。
+  // ============================================================
   template<class Derived>
   struct InertiaBase : NumericalBase<Derived>
   {
     SPATIAL_TYPEDEF_TEMPLATE(Derived);
 
+    // ---- CRTP 基础设施 ----
     Derived & derived()
     {
       return *static_cast<Derived *>(this);
@@ -60,7 +82,8 @@ namespace pinocchio
       return *const_cast<Derived *>(&derived());
     }
 
-    Scalar mass() const
+    // ---- 三个物理参数的访问器 ----
+    Scalar mass() const // m：质量 [kg]
     {
       return static_cast<const Derived *>(this)->mass();
     }
@@ -68,7 +91,7 @@ namespace pinocchio
     {
       return static_cast<const Derived *>(this)->mass();
     }
-    const Vector3 & lever() const
+    const Vector3 & lever() const // c：质心相对【本坐标系原点】的位置 [m]
     {
       return static_cast<const Derived *>(this)->lever();
     }
@@ -76,7 +99,7 @@ namespace pinocchio
     {
       return static_cast<const Derived *>(this)->lever();
     }
-    const Symmetric3 & inertia() const
+    const Symmetric3 & inertia() const // Ī_C：绕【质心】的转动惯量（非绕原点！）
     {
       return static_cast<const Derived *>(this)->inertia();
     }
@@ -85,6 +108,9 @@ namespace pinocchio
       return static_cast<const Derived *>(this)->inertia();
     }
 
+    // ---- 展开成 6×6 稠密矩阵 ----
+    // 仅在需要与稠密线性代数对接时使用；内部算法都直接用 (m, c, Ī_C)
+    // 三参数形式运算，比 6×6 矩阵乘法快得多
     template<typename Matrix6Like>
     void matrix(const Eigen::MatrixBase<Matrix6Like> & mat) const
     {
@@ -99,6 +125,8 @@ namespace pinocchio
       return matrix();
     }
 
+    // ---- 6×6 逆矩阵 I⁻¹：从动量反解速度 ν = I⁻¹·h ----
+    // 同样利用解析结构求逆，不做通用 6×6 数值求逆
     template<typename Matrix6Like>
     void inverse(const Eigen::MatrixBase<Matrix6Like> & mat) const
     {
@@ -122,6 +150,17 @@ namespace pinocchio
       return !(*this == other);
     }
 
+    // ============================================================
+    // 惯量加法：把两个刚体【焊死成一个】后的复合惯量
+    //
+    // 这不是普通的矩阵加法 —— 需要先把两者的质心归算到同一参考点：
+    //     m   = m₁ + m₂
+    //     c   = (m₁c₁ + m₂c₂) / m          （合成质心）
+    //     Ī_C = Ī₁ + Ī₂ + 平行轴修正项       （各自搬到新质心）
+    //
+    // 这正是 CRBA 中复合刚体惯量递推 I_i^c = I_i + Σ ᶦX*_j I_j^c ʲX_i
+    // 所依赖的运算（见 §4.5.3）。
+    // ============================================================
     Derived & operator+=(const Derived & Yb)
     {
       return derived().__pequ__(Yb);
@@ -139,6 +178,10 @@ namespace pinocchio
       return derived().__minus__(Yb);
     }
 
+    // ---- 核心运算：动量 = 惯量 × 速度，h = I·ν ----
+    // 注意返回类型是 Force（∈ se*(3)）而非 Motion —— 惯量正是
+    // "从速度空间到力空间"的线性映射，这在类型上就体现出来了。
+    // 内部用 (m, c, Ī_C) 直接算，不展开 6×6 矩阵
     template<typename MotionDerived>
     ForceTpl<typename traits<MotionDerived>::Scalar, traits<MotionDerived>::Options>
     operator*(const MotionDense<MotionDerived> & v) const
@@ -146,12 +189,17 @@ namespace pinocchio
       return derived().__mult__(v);
     }
 
+    // ---- 二次型 νᵀIν = 2×动能 ----
+    // 比先算 I·ν 再点乘更快（省去构造中间 Force 对象）。
+    // 也是 CRBA 中 M(q) 元素的来源：Mᵢⱼ = Sᵢᵀ I^c Sⱼ（见 §4.5.1）
     template<typename MotionDerived>
     Scalar vtiv(const MotionDense<MotionDerived> & v) const
     {
       return derived().vtiv_impl(v);
     }
 
+    // ---- 惯量对速度的变分 ∂(I·ν)/∂ν 相关项 ----
+    // 用于解析梯度：RNEA/ABA 导数中需要惯量项随速度的变化率（见 §4.8）
     template<typename MotionDerived>
     Matrix6 variation(const MotionDense<MotionDerived> & v) const
     {
@@ -166,6 +214,10 @@ namespace pinocchio
     /// \param[in] I The spatial inertia in motion.
     /// \param[out] Iout The time derivative of the inertia I.
     ///
+    // ---- İ = ν ×* I ：惯量矩阵随刚体运动的时间导数（左乘版本）----
+    // 物理含义：连杆在旋转时，其惯量在【固定参考系】中看是变化的
+    //   （绕不同轴的转动惯量不同），这一项刻画该变化率。
+    // 用于 RNEA/ABA 的解析导数，以及惯量矩阵时间导数 Ṁ(q) 的计算
     template<typename MotionDerived, typename M6>
     static void
     vxi(const MotionDense<MotionDerived> & v, const Derived & I, const Eigen::MatrixBase<M6> & Iout)
@@ -190,6 +242,9 @@ namespace pinocchio
     /// \param[in] I The spatial inertia in motion.
     /// \param[out] Iout The time derivative of the inertia I.
     ///
+    // ---- I ×ν 的对偶形式（右乘版本）----
+    // 与上面的 vxi 配对使用：完整的 d(Iν)/dt 需要 İν + Iν̇ 两部分，
+    // vxi/ivx 分别提供其中不同的组合，供导数算法按需选用
     template<typename MotionDerived, typename M6>
     static void
     ivx(const MotionDense<MotionDerived> & v, const Derived & I, const Eigen::MatrixBase<M6> & Iout)
@@ -232,6 +287,15 @@ namespace pinocchio
     }
 
     /// aI = aXb.act(bI)
+    // ---- 惯量的坐标变换：ᵃI = ᵃX*_b · ᵇI · ᵇX_a（合同变换）----
+    //
+    // 注意与速度/力的【单边】变换不同，惯量是【双线性型】，
+    // 变换时左右各乘一次（正如二次型 xᵀAx 换基时 A → PᵀAP）。
+    // 由 h = I·ν 且两侧分别按余伴随/伴随变换即可推出。
+    //
+    // 实现上无需真的做两次 6×6 乘法：只需变换 (m, c, Ī_C) 三个参数
+    //   m 不变、c 按点变换、Ī_C 做旋转合同变换 R·Ī·Rᵀ
+    // —— 又一次体现"存 10 个参数而非 36 个"的收益。
     template<typename S2, int O2>
     Derived se3Action(const SE3Tpl<S2, O2> & M) const
     {
@@ -239,6 +303,7 @@ namespace pinocchio
     }
 
     /// bI = aXb.actInv(aI)
+    // 逆变换。RNEA/CRBA 中把子连杆惯量归算到父关节坐标系时大量使用
     template<typename S2, int O2>
     Derived se3ActionInverse(const SE3Tpl<S2, O2> & M) const
     {
@@ -292,6 +357,14 @@ namespace pinocchio
   }; // traits InertiaTpl
 
   template<typename _Scalar, int _Options>
+  // ============================================================
+  // InertiaTpl：空间惯量的具体实现，即日常使用的 pinocchio::Inertia
+  //
+  // 数据成员只有三个（见类末尾 protected 段）：
+  //     m_mass (1) + m_com (3) + m_inertia (6, 对称阵压缩存储) = 10 个标量
+  // 而非 6×6=36 个 —— 这 10 个数正是刚体惯量的全部自由度，
+  // 也正是惯量参数辨识中需要标定的量。
+  // ============================================================
   struct InertiaTpl : public InertiaBase<InertiaTpl<_Scalar, _Options>>
   {
 
@@ -385,6 +458,8 @@ namespace pinocchio
       inertia().setIdentity();
     }
 
+    // 随机惯量。注意必须保证转动惯量【正定】（物理上惯量张量必正定），
+    // 故用 RandomPositive() 而非普通随机对称阵；质量也加 1 保证为正
     static InertiaTpl Random()
     {
       // We have to shoot "I" definite positive and not only symmetric.
@@ -398,6 +473,7 @@ namespace pinocchio
     /// \param[in] mass of the sphere.
     /// \param[in] radius of the sphere.
     ///
+    // 实心球：Ī = (2/5)·m·r²·1₃（三轴对称），转调椭球公式即可
     static InertiaTpl FromSphere(const Scalar mass, const Scalar radius)
     {
       return FromEllipsoid(mass, radius, radius, radius);
@@ -412,6 +488,8 @@ namespace pinocchio
     /// \param[in] y semi-axis dimension along the local Y axis.
     /// \param[in] z semi-axis dimension along the local Z axis.
     ///
+    // 实心椭球（半轴 x,y,z）：Ī_xx = m(y²+z²)/5，其余轮换。
+    // 质心在原点，故 lever = 0；惯量张量为对角阵（沿主轴）
     static InertiaTpl
     FromEllipsoid(const Scalar mass, const Scalar x, const Scalar y, const Scalar z)
     {
@@ -430,6 +508,9 @@ namespace pinocchio
     /// \param[in] radius of the cylinder.
     /// \param[in] length of the cylinder.
     ///
+    // 实心圆柱（轴沿【Z】）：
+    //   Ī_xx = Ī_yy = m(r²/4 + L²/12)   （横向，含长度贡献）
+    //   Ī_zz = m·r²/2                    （绕自身轴）
     static InertiaTpl FromCylinder(const Scalar mass, const Scalar radius, const Scalar length)
     {
       const Scalar radius_square = radius * radius;
@@ -447,6 +528,7 @@ namespace pinocchio
     /// \param[in] y dimension along the local Y axis.
     /// \param[in] z dimension along the local Z axis.
     ///
+    // 实心长方体（边长 x,y,z）：Ī_xx = m(y²+z²)/12，其余轮换
     static InertiaTpl FromBox(const Scalar mass, const Scalar x, const Scalar y, const Scalar z)
     {
       const Scalar a = mass * (y * y + z * z) / Scalar(12);

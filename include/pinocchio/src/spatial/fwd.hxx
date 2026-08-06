@@ -10,6 +10,17 @@
   #include "pinocchio/spatial/fwd.hpp"
 #endif // PINOCCHIO_LSP
 
+// ============================================================
+// spatial 模块的前向声明汇总
+//
+// 作用：先声明 SE3Tpl / MotionTpl / ForceTpl / InertiaTpl 等模板的
+// 存在与默认模板参数，让各头文件之间的【循环依赖】得以解开
+//   （例如 SE3 的 act() 要提到 Motion，而 Motion 的变换又要提到 SE3）。
+//
+// 这里同时给出面向用户的别名 SE3 / Motion / Force / Inertia，
+// 它们都是对应 XxxTpl<context::Scalar, context::Options> 的 typedef
+// （生成机制见 PINOCCHIO_GUIDE.md §11.2）。
+// ============================================================
 namespace pinocchio
 {
   /// \internal

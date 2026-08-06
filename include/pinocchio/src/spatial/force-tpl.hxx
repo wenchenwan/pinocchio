@@ -45,6 +45,12 @@ namespace pinocchio
   /// cases, you don't have to worry about this templated quantities.
   ///
   template<typename _Scalar, int _Options>
+  // ============================================================
+  // ForceTpl：拥有自己内存的稠密空间力，日常使用的 pinocchio::Force
+  //
+  //   φ = [f(0:3); τ(3:6)] 存为单个连续 Vector6
+  // 与 MotionTpl 结构完全一致，区别仅在变换时走【余伴随】而非伴随。
+  // ============================================================
   class ForceTpl : public ForceDense<ForceTpl<_Scalar, _Options>>
   {
   public:

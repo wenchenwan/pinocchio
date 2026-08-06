@@ -87,9 +87,24 @@ namespace pinocchio
     using Base::__pequ__;
     using Base::__plus__;
 
+    // ============================================================
+    // MotionRef：把【外部已有的 6D 内存】当作 Motion 来操作的视图类
+    //
+    // 与 MotionTpl 的根本区别：
+    //   MotionTpl 自己【拥有】一块 Vector6 内存；
+    //   MotionRef 只【引用】别处的内存，本身不分配、不拷贝数据。
+    //
+    // 典型用途：Data 中把所有关节速度存成一个大矩阵，
+    //   MotionRef 让你把其中某一列当作 Motion 直接读写，
+    //   全程零拷贝 —— 对每步都要访问几十个关节的动力学循环至关重要。
+    //
+    // ⚠️ 生命周期：MotionRef 不延长被引用内存的寿命。
+    //    源数据一旦释放，这个视图即悬空。
+    // ============================================================
+
     /// \brief Default constructor from a 6 dimensional vector.
     MotionRef(typename PINOCCHIO_EIGEN_REF_TYPE(Vector6ArgType) v_like)
-    : m_ref(v_like)
+    : m_ref(v_like) // 绑定引用，不复制数据
     {
       EIGEN_STATIC_ASSERT(
         Vector6ArgType::ColsAtCompileTime == 1, YOU_TRIED_CALLING_A_VECTOR_METHOD_ON_A_MATRIX);
@@ -97,6 +112,7 @@ namespace pinocchio
     }
 
     /// \brief Copy constructor from another MotionRef.
+    // 浅拷贝：新的 Ref 指向【同一块】内存（两者互为别名）
     MotionRef(const MotionRef & other)
     : m_ref(other.m_ref)
     {
@@ -112,6 +128,9 @@ namespace pinocchio
     }
 
     // Getters
+    // ---- 分量访问：在被引用内存上再取子视图，依然零拷贝 ----
+    // const 版本与非 const 版本写法不同（前者显式构造 ConstAngularType，
+    // 后者用 segment），是为了让两种 Ref 类型都能正确保持常量性
     ConstAngularType angular_impl() const
     {
       return ConstAngularType(m_ref.derived(), ANGULAR);
@@ -144,6 +163,10 @@ namespace pinocchio
     }
 
     // Specific operators for MotionTpl and MotionRef
+    // ---- 专用运算重载：直接对被引用的 6D 内存整体运算 ----
+    // 与 MotionTpl 中同名重载用意相同：绕过逐段(linear/angular)操作，
+    // 让 Eigen 一次处理 6 个元素，便于向量化。
+    // 注意 __pequ__ / __mequ__ 会【就地修改被引用的外部内存】
     template<typename S1, int O1>
     MotionPlain __plus__(const MotionTpl<S1, O1> & v) const
     {
@@ -213,10 +236,19 @@ namespace pinocchio
     }
 
   protected:
+    // 数据成员是 Eigen::Ref（一个"胖指针"：地址 + 步长），不是数据本身
     DataRefType m_ref;
 
   }; // class MotionRef<Vector6Like>
 
+  // ============================================================
+  // MotionRef<const Vector6> —— 只读视图的偏特化
+  //
+  // 与上面非 const 版本的区别：引用的是常量内存，因此
+  //   · 不提供可写的 angular()/linear() 重载
+  //   · 不提供 __pequ__ / __mequ__ 等就地修改运算
+  // 用于把 Data 中的只读数据安全地暴露为 Motion 接口。
+  // ============================================================
   template<typename Vector6ArgType>
   struct traits<MotionRef<const Vector6ArgType>>
   {
@@ -291,6 +323,9 @@ namespace pinocchio
     }
 
     // Specific operators for MotionTpl and MotionRef
+    // ---- 只读特化的专用运算重载 ----
+    // 本特化引用的是 const 内存，故只提供不修改自身的运算
+    // （__plus__/__minus__ 返回新对象；没有 __pequ__/__mequ__）
     template<typename S1, int O1>
     MotionPlain __plus__(const MotionTpl<S1, O1> & v) const
     {

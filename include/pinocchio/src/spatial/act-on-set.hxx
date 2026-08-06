@@ -14,6 +14,24 @@
 namespace pinocchio
 {
 
+  // ============================================================
+  // forceSet / motionSet：对【一批】空间量做批量变换
+  //
+  // 处理对象是 6×N 矩阵 —— 每一列是一个 Motion 或 Force。
+  //
+  // 为什么需要专门的批量版本，而不是循环调用单个 act()：
+  //   · 关节 Jacobian J ∈ R^{6×nv} 的每一列都是一个空间速度，
+  //     变换 J 到另一坐标系就是对所有列做同一个 Ad 变换；
+  //   · 批量处理可把"取 R、算 t̂"等公共部分提到循环外，
+  //     并让 Eigen 对整块矩阵做向量化，远快于逐列调用。
+  //
+  // 两个命名空间的区别正是对偶性：
+  //   motionSet::se3Action → 用【伴随】  Ad     （速度）
+  //   forceSet ::se3Action → 用【余伴随】Ad⁻ᵀ  （力）
+  //
+  // 典型调用者：getJointJacobian / getFrameJacobian 的参考系转换、
+  // CRBA 中 Ag 矩阵的组装（motionSet::inertiaAction）。
+  // ============================================================
   namespace forceSet
   {
     ///

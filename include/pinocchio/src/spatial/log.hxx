@@ -61,6 +61,15 @@ namespace pinocchio
 
   /// \brief Generic evaluation of log3 function
   template<typename _Scalar>
+  // ============================================================
+  // log3_impl：log3 的实际计算，按标量类型特化
+  //
+  // 三种情形分别处理（这是 log3 全部复杂度的来源）：
+  //   ① θ 接近 0  ：sinθ→0，改用泰勒展开，避免 0/0
+  //   ② θ 接近 π  ：sinθ→0 但 θ 不小，(R−Rᵀ) 退化，
+  //                 须改从 R 的【对角元】开方求转轴方向，再定符号
+  //   ③ 一般情形  ：ω = θ/(2sinθ)·unSkew(R − Rᵀ)
+  // ============================================================
   struct log3_impl
   {
     template<typename Matrix3Like, typename Vector3Out>
@@ -152,6 +161,8 @@ namespace pinocchio
 
   /// \brief Generic evaluation of Jlog3 function
   template<typename _Scalar>
+  // ---- Jlog3_impl：Jlog3 的实际计算 ----
+  // 同样需在 θ→0 处切泰勒展开：θsinθ/(2(1−cosθ)) → 1 − θ²/12
   struct Jlog3_impl
   {
     template<typename Scalar, typename Vector3Like, typename Matrix3Like>
@@ -192,6 +203,9 @@ namespace pinocchio
 
   /// \brief Generic evaluation of log6 function
   template<typename _Scalar>
+  // ---- log6_impl：log6 的实际计算 ----
+  // 先由 log3 得到 ω，再求平移部分 v = V(ω)⁻¹·p。
+  // V⁻¹ 的系数在 θ→0 处同样奇异，需泰勒展开处理
   struct log6_impl
   {
     template<typename Scalar, int Options, typename MotionDerived>
