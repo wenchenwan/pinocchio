@@ -229,12 +229,15 @@ namespace pinocchio
         template<typename JointModelDerived>
         ReturnType operator()(const JointModelBase<JointModelDerived> & jmodel) const
         {
+          // JointModelDerived = JointModelBase<JointModelRX>&
           typedef typename helper::add_const_if_const<
             JointData, typename JointModelBase<JointModelDerived>::JointDataDerived>::type
             JointDataDerived;
           return bf::invoke(
+            // 模板类的模板函数指针
             &JointVisitorDerived::template algo<JointModelDerived>,
             bf::append(
+              // jdata在这里还是一个variant类型，必须先转换为JointDataDerived类型
               boost::ref(jmodel.derived()), boost::ref(boost::get<JointDataDerived>(jdata)), args));
         }
 
