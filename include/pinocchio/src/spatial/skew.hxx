@@ -65,6 +65,7 @@ namespace pinocchio
   ///
   /// \return The skew matrix representation of v.
   ///
+  // 返回值版本
   template<typename D>
   inline Eigen::Matrix<typename D::Scalar, 3, 3, PINOCCHIO_EIGEN_PLAIN_TYPE(D)::Options>
   skew(const Eigen::MatrixBase<D> & v)

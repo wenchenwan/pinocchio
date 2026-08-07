@@ -24,7 +24,7 @@ namespace pinocchio
     typedef Eigen::Matrix<Scalar, 4, 4, _Options> Matrix4;
     typedef Eigen::Matrix<Scalar, 6, 6, _Options> Matrix6;
     typedef Matrix6 ActionMatrixType;
-    typedef Matrix4 HomogeneousMatrixType;
+    typedef Matrix4 HomogeneousMatrixType; // 齐次矩阵
     typedef typename PINOCCHIO_EIGEN_REF_CONST_TYPE(Vector6) ToVectorConstReturnType;
     typedef typename PINOCCHIO_EIGEN_REF_TYPE(Vector6) ToVectorReturnType;
     typedef typename Vector6::template FixedSegmentReturnType<3>::Type LinearType;
