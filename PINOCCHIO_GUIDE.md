@@ -75,6 +75,15 @@
     - [11.2 Tpl 模板 + context 默认标量](#112-tpl-模板--context-默认标量)
     - [11.3 CRTP + Boost.Fusion 访问者](#113-crtp--boostfusion-访问者)
     - [11.4 第三个模板参数 JointCollectionTpl：关节类型目录](#114-第三个模板参数-jointcollectiontpl关节类型目录)
+    - [11.5 Eigen 视图类型：零拷贝的实现基础](#115-eigen-视图类型零拷贝的实现基础)
+      - [11.5.1 从 traits 里的四行 typedef 说起](#1151-从-traits-里的四行-typedef-说起)
+      - [11.5.2 FixedSegmentReturnType 不是函数，是类型萃取器](#1152-fixedsegmentreturntype-不是函数是类型萃取器)
+      - [11.5.3 VectorBlock 是什么](#1153-vectorblock-是什么)
+      - [11.5.4 为什么必须是视图而不是 Vector3](#1154-为什么必须是视图而不是-vector3)
+      - [11.5.5 为什么 Linear 和 Angular 是同一个类型](#1155-为什么-linear-和-angular-是同一个类型)
+      - [11.5.6 const 与非 const 两套的必要性](#1156-const-与非-const-两套的必要性)
+      - [11.5.7 两个必须写的关键字](#1157-两个必须写的关键字)
+      - [11.5.8 使用时的两个注意点](#1158-使用时的两个注意点)
 12. [实战：追踪一个算法从 API 到实现](#12-实战追踪一个算法从-api-到实现)
 13. [Python 绑定如何映射到 C++](#13-python-绑定如何映射到-c)
 14. [源码阅读推荐顺序](#14-源码阅读推荐顺序)
@@ -2729,7 +2738,7 @@ int main(int argc, char** argv)
 | 接触约束动力学    | `include/pinocchio/algorithm/constrained-dynamics.hpp`   |
 | 接触 Cholesky     | `include/pinocchio/algorithm/contact-cholesky.hpp`       |
 | 接触信息          | `include/pinocchio/algorithm/contact-info.hpp`           |
-| SE(3) 类型        | `include/pinocchio/spatial/se3.hpp`                      |
+| SE(3) 类型        | `include/pinocchio/src/spatial/se3-tpl.hxx`              |
 | 空间运动（Twist） | `include/pinocchio/spatial/motion.hpp`                   |
 | 空间力（Wrench）  | `include/pinocchio/spatial/force.hpp`                    |
 | 空间惯量          | `include/pinocchio/spatial/inertia.hpp`                  |
@@ -3497,6 +3506,199 @@ typedef ModelTpl<context::Scalar, context::Options> Model;   // 只写 2 个参�
 
 ---
 
+### 11.5 Eigen 视图类型：零拷贝的实现基础
+
+前面四节讲的都是"Pinocchio 自己的"机制。但读 `spatial/` 源码时还会撞上第五道坎 ——
+**Eigen 的视图类型**。它不是 Pinocchio 发明的，却是 `v.linear() = ...` 这类写法能成立、
+且不产生任何拷贝的根本原因。
+
+#### 11.5.1 从 traits 里的四行 typedef 说起
+
+打开 [motion-tpl.hxx](include/pinocchio/src/spatial/motion-tpl.hxx#L30)，
+`traits<MotionTpl>` 里有这么四行：
+
+```cpp
+typedef typename Vector6::template FixedSegmentReturnType<3>::Type      LinearType;
+typedef typename Vector6::template FixedSegmentReturnType<3>::Type      AngularType;
+typedef typename Vector6::template ConstFixedSegmentReturnType<3>::Type ConstLinearType;
+typedef typename Vector6::template ConstFixedSegmentReturnType<3>::Type ConstAngularType;
+```
+
+它们声明的是 `linear()` / `angular()` 的**返回类型**。实测展开后的真身：
+
+```
+LinearType      = Eigen::VectorBlock<Eigen::Matrix<double,6,1>, 3>
+ConstLinearType = Eigen::VectorBlock<Eigen::Matrix<double,6,1> const, 3>
+```
+
+**不是 `Vector3`** —— 这是全部关键。
+
+#### 11.5.2 `FixedSegmentReturnType` 不是函数，是类型萃取器
+
+名字里带 `ReturnType` 容易让人以为是函数。看 Eigen 源码
+`Eigen/src/plugins/BlockMethods.h:40-41`，
+它其实是**嵌套的结构体模板**，只有一行：
+
+```cpp
+template<int Size> struct FixedSegmentReturnType
+{ typedef VectorBlock<Derived, Size> Type; };
+
+template<int Size> struct ConstFixedSegmentReturnType
+{ typedef const VectorBlock<const Derived, Size> Type; };
+```
+
+作用就是回答一个编译期问题：*"对类型 `Derived` 取长度为 `Size` 的定长片段，
+结果是什么类型？"* 答案是 `VectorBlock<Derived, Size>`。
+
+它被 `segment<N>()` 用作返回类型
+（`BlockMethods.h:1295`）：
+
+```cpp
+template<int N>
+typename FixedSegmentReturnType<N>::Type segment(Index start, Index n = N)
+{ return typename FixedSegmentReturnType<N>::Type(derived(), start, n); }
+```
+
+这正是 Pinocchio 里 `m_data.template segment<3>(ANGULAR)` 调用的那个重载。
+
+#### 11.5.3 `VectorBlock` 是什么
+
+看 Eigen 源码 `Eigen/src/Core/VectorBlock.h:56`，
+它只是 `Block` 针对"向量"的一层便捷包装：
+
+```cpp
+template<typename VectorType, int Size> class VectorBlock
+  : public Block<VectorType,
+                 IsRowMajor ? 1    : Size,     // 列向量 → Size×1
+                 IsRowMajor ? Size : 1>
+{
+    // 定长构造：只需起点，长度由模板参数给出
+    VectorBlock(VectorType& vector, Index start)
+      : Base(vector, IsColVector ? start : 0, IsColVector ? 0 : start) {}
+};
+```
+
+即：**`VectorBlock<V,3>` = 一个 3×1 的 `Block`**，自动处理行/列向量的方向差异。
+
+而 `Block` 的数据成员（`Eigen/src/Core/Block.h:320-324`）
+揭示了"视图"的本质：
+
+```cpp
+XprTypeNested m_xpr;            // ← 对【源对象】的引用，不是数据副本
+const variable_if_dynamic<...> m_startRow, m_startCol, m_blockRows, m_blockCols;
+```
+
+`m_xpr` 存的是源矩阵的**引用**，其余是偏移量与尺寸元信息。`variable_if_dynamic` 在
+尺寸编译期已知时是空类，**不占存储** —— 又一处"能在编译期确定的信息绝不放到运行时"。
+
+#### 11.5.4 为什么必须是视图而不是 `Vector3`
+
+`MotionTpl` 只有一个数据成员 `Vector6 m_data`，`linear()` 的实现是：
+
+```cpp
+LinearType linear_impl() { return m_data.template segment<3>(LINEAR); }
+```
+
+若返回类型写成 `Vector3`，就会**拷贝**出 3 个 double，于是：
+
+```cpp
+v.linear()[0] = 42.0;   // 改的是临时拷贝，原对象纹丝不动 —— 静默错误
+```
+
+返回视图时实测行为正确：
+
+```
+经 v.linear()[0]=42 后 v.toVector()[0] = 42     ✓ 改到了原对象
+```
+
+内存地址也证实了别名关系：
+
+```
+v.data()               = 0x7fffe73d5300
+v.segment<3>(0).data() = 0x7fffe73d5300   ← 同一地址
+v.segment<3>(3).data() = 0x7fffe73d5318   ← 偏移 24 字节 = 3 个 double
+```
+
+**这就是 `v.linear() = some_vector` 能作左值的原因。** 在动力学循环里，每步都要读写
+几十个关节的速度/力分量，若每次访问都拷贝 3 个 double，开销相当可观。
+
+#### 11.5.5 为什么 Linear 和 Angular 是同一个类型
+
+注意开头那四行里，**前两行文本完全一样**。实测确认：
+
+| 判定 | 结果 |
+|------|------|
+| `LinearType == AngularType` | ✅ true |
+| `ConstLinearType == ConstAngularType` | ✅ true |
+| `LinearType == ConstLinearType` | ❌ false |
+
+原因在 `segment<3>(offset)` 的签名分工：
+
+$$\underbrace{3}_{\text{编译期：长度 → 编码进类型}} \qquad \underbrace{\texttt{offset}}_{\text{运行期实参：起点 → 不进类型}}$$
+
+`segment<3>(0)` 与 `segment<3>(3)` 长度都是 3，故**类型相同**，区别仅在运行时的起始地址。
+
+那为何还要起两个名字？—— 一是语义可读性；二是**为其他派生类留出特化余地**：
+`MotionRef` 引用的可能是矩阵的某一列（带 stride 的非连续内存），届时它的
+`LinearType` 就是另一套类型。基类 `MotionBase` 统一按 `LinearType` / `AngularType`
+这两个名字编程，具体是什么由各派生类的 `traits` 决定 —— 这正是 [§11.2](#112-tpl-模板--context-默认标量)
+"类型即契约"思路的延续。
+
+#### 11.5.6 const 与非 const 两套的必要性
+
+对应 `linear_impl()` 的两个重载：
+
+```cpp
+ConstLinearType linear_impl() const;  // 只读视图（const 对象上调用）
+LinearType      linear_impl();        // 可写视图
+```
+
+`VectorBlock<Matrix const, 3>` 的 `const` 加在**模板参数**上，使该视图无法写入。
+少了这套区分，就能通过 `const Motion&` 修改对象 —— const 正确性会被绕过。
+
+#### 11.5.7 两个必须写的关键字
+
+```cpp
+typedef typename Vector6::template FixedSegmentReturnType<3>::Type LinearType;
+//      ^^^^^^^^          ^^^^^^^^
+```
+
+| 关键字 | 为什么不能省 |
+|--------|--------------|
+| `typename` | `Vector6` 依赖模板参数 `_Scalar`，编译器在实例化前无法判断 `::Type` 是**类型**还是**静态成员变量**（默认按变量处理），须显式声明 |
+| `template` | `FixedSegmentReturnType` 是依赖类型的**成员模板**。不加它，编译器会把后面的 `<` 当成**小于号**，报出一串莫名其妙的语法错误 |
+
+同样的道理也解释了实现里的 `m_data.template segment<3>(LINEAR)` —— 那个 `.template` 是一回事。
+
+#### 11.5.8 使用时的两个注意点
+
+**① 视图会悬空。** 它只持有源对象的引用，不延长其生命周期：
+
+```cpp
+auto bad = Motion::Random().linear();   // ✗ 临时 Motion 已析构，bad 悬空
+Motion v = Motion::Random();
+auto ok  = v.linear();                  // ✓ v 还活着
+```
+
+同理，[§11.5.3](#1153-vectorblock-是什么) 的机制也解释了
+`MotionRef` / `ForceRef` 为什么要在注释里强调生命周期风险。
+
+**② 需要固化时用 `.eval()` 或赋给具体类型：**
+
+```cpp
+Eigen::Vector3d snapshot = v.linear();  // 拷贝一份，与 v 脱钩
+auto            view     = v.linear();  // 仍是视图，随 v 变化
+```
+
+这也是 Pinocchio 中 `plain()` 存在的意义：把表达式/引用类型固化成 `MotionTpl`，
+打断表达式模板链。
+
+> **小结**：`spatial/` 里凡是形如 `XxxReturnType` 的 typedef，都是"这个访问器返回
+> 什么视图类型"的声明。看到它们不必深究 Eigen 内部，只需记住三点：
+> **①它们是视图不是拷贝 ②可作左值 ③不要让它们活得比源对象久**。
+
+---
+
 ## 12. 实战：追踪一个算法从 API 到实现
 
 以最常用的 `forwardKinematics` 为例，走通"Python 调用 → C++ 实现 → 关节细节"的完整链路。
@@ -3527,7 +3729,7 @@ pinocchio.forwardKinematics(model, data, q)
 
 **⑥ 数据结构**——`data.oMi` 的定义在
 [include/pinocchio/src/multibody/data.hxx](include/pinocchio/src/multibody/data.hxx)（`DataTpl` 成员），
-`SE3` 的 `operator*`/`actInv` 在 [include/pinocchio/spatial/se3.hpp](include/pinocchio/spatial/se3.hpp)。
+`SE3` 的 `operator*`/`actInv` 在 [se3-tpl.hxx](include/pinocchio/src/spatial/se3-tpl.hxx)（接口声明见 [se3-base.hxx](include/pinocchio/src/spatial/se3-base.hxx)）。
 
 **通用追踪清单**（换任何算法都适用）：
 
