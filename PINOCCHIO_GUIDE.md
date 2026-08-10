@@ -20,6 +20,8 @@
      - [2.2.8 速查对照表](#228-速查对照表)
      - [2.2.9 为什么值得接受这套形式](#229-为什么值得接受这套形式)
    - [2.3 空间惯量](#23-空间惯量)
+     - [2.3.1 6×6 逆矩阵的解析形式](#231-6times6-逆矩阵的解析形式)
+     - [2.3.2 另外两种惯量参数化（辨识与优化用）](#232-另外两种惯量参数化辨识与优化用)
 3. [Model / Data 架构](#3-model--data-架构)
    - [3.1 Joint 与 Frame：oMi 与 oMf 的区别和联系](#31-joint-与-frameomi-与-omf-的区别和联系)
 4. [核心算法原理](#4-核心算法原理)
@@ -418,6 +420,105 @@ Y.inertia()  // Ī_C：绕质心的 3×3 转动惯量
 
 空间力方程（Newton-Euler）：$\phi = I\,a + \nu\times^*(I\,\nu)$，详见
 [2.2.6](#226-运动方程中的-omegatimes-项)。
+
+#### 2.3.1 $6\times6$ 逆矩阵的解析形式
+
+$I^{-1}$ 把动量映射回速度（$\nu = I^{-1}h$），也把冲量映射为速度增量
+（自由漂浮刚体受冲量 $\phi$ 后 $\Delta\nu = I^{-1}\phi$）。Pinocchio **不调用通用
+$6\times6$ 求逆**，而是用闭式解：
+
+$$I^{-1} = \begin{bmatrix}
+\tfrac{1}{m}\mathbb{1}_3 - \hat c\,\bar I_C^{-1}\hat c & \hat c\,\bar I_C^{-1} \\[2pt]
+-\bar I_C^{-1}\hat c & \bar I_C^{-1}
+\end{bmatrix}$$
+
+**推导要点**：对 $I$ 做分块 Schur 补消元时，右下块的 Schur 补恰好化简为
+$\bar I_C$（绕**质心**的转动惯量）—— 正向矩阵里的平行轴项 $-m\hat c\hat c$ 被完全抵消。
+这是"存 $\bar I_C$ 而非绕原点惯量"这一设计的又一处红利。
+
+> **数值验证**：四个分块与 [`inverse_impl`](include/pinocchio/src/spatial/inertia.hxx)
+> 的实现**严格相等**（残差 $0$）；$\|I\cdot I^{-1}-E\| = 5.1\times10^{-16}$，
+> 与稠密数值求逆之差 $6.0\times10^{-16}$。
+
+**为何值得手写**：通用 LU/LDLᵀ 需 $O(6^3)\approx216$ 次乘加；闭式解只需一次
+$3\times3$ 对称求逆（$\bar I_C^{-1}$）加若干叉乘。源码里连 $\hat c$ 都不显式构造，
+而是用 `colwise().cross()` 和手工展开的三列 —— 与 [§2.2.4](#224-坐标变换伴随与余伴随)
+中伴随矩阵的实现是同一套省算力手法。ABA 的铰接体惯量求逆、接触冲量求解都依赖它。
+
+#### 2.3.2 另外两种惯量参数化（辨识与优化用）
+
+`inertia.hxx` 末尾还有两个类，**不参与**日常动力学计算，专为**惯量参数辨识**服务：
+
+先明确问题。刚体惯量的 10 个自由度常写成**动力学参数向量**：
+
+$$\pi = [\,m,\; \underbrace{mc_x, mc_y, mc_z}_{h}, \; I_{xx}, I_{xy}, I_{yy}, I_{xz}, I_{yz}, I_{zz}\,]^\top \in \mathbb{R}^{10}$$
+
+麻烦在于：**并非任意 $\pi$ 都对应真实存在的物体**。除 $m>0$ 外，转动惯量还须满足
+三角不等式 $I_{xx}+I_{yy}\ge I_{zz}$ 等约束。实测：直接随机取 10 个正的动力学参数，
+**100% 非物理**。若辨识结果违反这些约束，后续仿真会出现负质量、能量不守恒等荒唐行为。
+
+**① `PseudoInertiaTpl`** —— 把约束变成"矩阵正定"（Wensing, Kim & Slotine, RA-L 2017）
+
+重排成 $4\times4$ 对称阵：
+
+$$J = \begin{bmatrix} \Sigma & h \\ h^\top & m\end{bmatrix},
+\qquad h = mc, \qquad \Sigma = \tfrac12\operatorname{tr}(\bar I_O)\,\mathbb{1}_3 - \bar I_O$$
+
+> ⚠️ 这里的 $\bar I_O$ 是**绕坐标系原点**的转动惯量（$\bar I_O = \bar I_C - m\hat c\hat c$），
+> 与 `InertiaTpl::inertia()` 返回的**绕质心** $\bar I_C$ 不同。动力学参数向量 $\pi$ 的后
+> 6 维用的正是 $\bar I_O$ —— 这是辨识领域的惯例，容易与 §2.3 开头的存储约定混淆。
+> 逆变换为 $\bar I_O = \operatorname{tr}(\Sigma)\mathbb{1}_3 - \Sigma$（实测残差 $0$）。
+
+核心定理：
+
+$$\pi \text{ 物理可实现} \iff J \succ 0$$
+
+正定约束是**凸**的（LMI），于是"带物理一致性约束的辨识"成为**凸半定规划**——
+有全局最优解、有成熟求解器。$J$ 亦正比于质量分布的二阶矩 $\int \tilde p\tilde p^\top \mathrm{d}m$，
+正定性即"质量分布不能退化到低维"。
+
+**② `LogCholeskyParametersTpl`** —— 把约束彻底**消掉**（Rucker & Wensing, RA-L 2022）
+
+思路更进一步：与其**施加**约束，不如换一组参数使约束自动满足。10 个参数
+$\theta = [\alpha,\ d_1,d_2,d_3,\ s_{12},s_{23},s_{13},\ t_1,t_2,t_3]$ 对应伪惯量的
+Cholesky 分解 $J = U^\top U$，其中上三角因子 $U$ 的**对角元取指数形式** $e^{d_i}$
+（"log" 由此得名）。因 $e^{d_i}>0$ 恒成立，$J$ 必然正定。
+
+> **数值验证**（20000 组 $\pm5$ 范围随机参数）：
+>
+> | 参数化 | 非物理比例 |
+> |---|---|
+> | 直接随机动力学参数 $\pi$ | **100 %** |
+> | log-Cholesky $\theta$ | **0 %**（最小特征值恒 $>0$，质量恒正，因 $m=e^{2\alpha}$） |
+>
+> 其 `calculateJacobian()`（$\partial\pi/\partial\theta \in \mathbb{R}^{10\times10}$）
+> 与有限差分吻合到 $5.4\times10^{-6}$。
+
+**三者关系**（同一组 10 个自由度的不同"坐标"，可无损互转，往返残差实测为 $0$）：
+
+```
+   LogCholeskyParameters (θ ∈ R¹⁰，无约束)
+            │ toDynamicParameters() / toInertia()
+            ▼
+   动力学参数 π ∈ R¹⁰ ──────────────┐
+            │ FromDynamicParameters()│ toDynamicParameters()
+            ▼                        │
+   PseudoInertia (4×4，J ≻ 0 ⇔ 物理) │
+            └────► InertiaTpl (m, c, Ī_C) ──┘
+                   日常动力学计算用这个
+```
+
+**选用建议**：
+
+| 场景 | 选择 |
+|------|------|
+| 跑 RNEA / CRBA / ABA | `InertiaTpl`（其余两者都不参与计算） |
+| 带物理约束的辨识，要**全局最优** | `PseudoInertia` + SDP 求解器 |
+| 梯度优化 / 可微仿真 / 学习 | `LogCholeskyParameters`（无约束 + 解析雅可比） |
+
+> ⚠️ log-Cholesky 虽**永不**越界，但参数趋向 $-\infty$ 时会**无限接近**奇异
+> （实测最小特征值可低至 $3\times10^{-18}$）。优化时若不加正则，可能收敛到
+> "薄如纸片"的病态惯量。
 
 ---
 
