@@ -76,6 +76,7 @@ namespace pinocchio
     //
     // 满足 ad_ν · μ = ν × μ（实测残差 0）。
     // 展开即：(ν×μ).v = v×μ_ω + ω×μ_v，(ν×μ).ω = ω×μ_ω
+    // 这里和论文定义的负号相反，原因是论文中速度的定义是【w ; v】,这里是【v ; w】。
     ActionMatrixType toActionMatrix_impl() const
     {
       ActionMatrixType X;
@@ -385,6 +386,8 @@ namespace pinocchio
   /// Basic operations specialization
   // ---- 运算符 ^ ：叉乘的简写形式（Featherstone 书中的记法）----
   // v1 ^ v2 = v1 × v2 （Motion × Motion → Motion）
+
+  // 这里使用motionPlain作为返回类型，而不是用M1，避免M1是ref类型时返回ref类型，导致返回值是局部变量的引用，出现悬空引用
   template<typename M1, typename M2>
   typename traits<M1>::MotionPlain operator^(const MotionDense<M1> & v1, const MotionDense<M2> & v2)
   {

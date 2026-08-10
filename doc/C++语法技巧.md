@@ -26,6 +26,8 @@
 13. [按输入种类分流重载 + `PlainObject` 返回类型](#13-按输入种类分流重载--plainobject-返回类型)
 14. [分派 struct + 空特化 + 模板化 `run`](#14-分派-struct--空特化--模板化-run编译期选分支运行时接对象)
 15. [`ref_selector`：自动选择"引用类型"](#15-ref_selector自动选择引用类型)
+16. [用 traits 计算类型：运算返回类型/标量 + CRTP 基类委托](#16-用-traits-计算类型运算返回类型标量--crtp-基类委托)
+17. [用户自定义转换运算符 `operator T()`](#17-用户自定义转换运算符-operator-t)
 
 ---
 
@@ -366,6 +368,93 @@ typedef typename PINOCCHIO_EIGEN_REF_TYPE(Vector6)       ToVectorReturnType;    
 - **调用处要加 `typename`**：`ref_selector<D>::type` 是依赖名（见 [§3](#3-依赖名消歧typename-与-template--template)），故用处写 `typedef typename PINOCCHIO_EIGEN_REF_CONST_TYPE(...) ...`。
 
 **典型出现处**：各 spatial 类型 traits 的 `ToVectorReturnType` 等（`motion-tpl.hxx`/`force-tpl.hxx`）。
+
+---
+
+## 16. 用 traits 计算类型：运算返回类型/标量 + CRTP 基类委托
+
+**是什么**：把"某类型的返回类型/标量/拥有型是什么"这类**类型关系**集中定义在 `traits<T>` 里，运算/operator 只引用
+`traits<T>::Xxx`，从而与具体类型细节解耦。有两个高频用法。
+
+### 16.1 用 traits 定 operator 的返回类型与标量
+
+```cpp
+// motion-dense.hxx：自由函数 operator，参数收 CRTP 基类，返回类型/标量走 traits
+template<typename M1, typename M2>
+typename traits<M1>::MotionPlain                                   // 返回"拥有型"Motion
+operator^(const MotionDense<M1> & v1, const MotionDense<M2> & v2)
+{ return v1.derived().cross(v2.derived()); }
+
+template<typename M1>
+typename traits<M1>::MotionPlain
+operator*(const typename traits<M1>::Scalar alpha, const MotionDense<M1> & v)  // 标量类型走 traits
+{ return v * alpha; }
+```
+
+**三个价值**：
+- **① 泛型**：参数 `const MotionDense<M1>&`（CRTP 基类）+ 返回 `traits<M1>::MotionPlain`，**一份模板通吃家族所有后端**
+  （`MotionTpl`/`MotionRef`/表达式…），无需逐类型重载。
+- **② 返回"拥有型"避免悬垂**：`traits<M1>::MotionPlain` = 该类型对应的**自有内存**类型（永远是 `MotionTpl`）。
+  输入若是 `MotionRef`（视图）或表达式，结果**必须物化成拥有型**才能安全返回——`MotionPlain` 就是干这个的
+  （`traits<MotionRef>::MotionPlain = MotionTpl`）。
+- **③ 标量自动跟随**：`traits<M1>::Scalar` 让 `alpha` 类型跟随 Motion 的标量（double/float/AD 通用），并约束重载、避免劫持无关的 `X * 类型`。
+
+### 16.2 返回类型 traits 对 CRTP 基类的"委托特化"
+
+```cpp
+// motion-dense.hxx：当查询目标是 CRTP 基类 MotionDense<Derived> 时，转交给具体 Derived
+template<typename Derived>
+struct SE3GroupAction<MotionDense<Derived>> {
+  typedef typename SE3GroupAction<Derived>::ReturnType ReturnType;   // 剥掉 MotionDense<> 包装，下放给 Derived
+};
+template<typename Derived, typename MotionDerived>
+struct MotionAlgebraAction<MotionDense<Derived>, MotionDerived> {
+  typedef typename MotionAlgebraAction<Derived, MotionDerived>::ReturnType ReturnType;
+};
+```
+
+- `SE3GroupAction<T>::ReturnType` = "SE3 作用在 T 上"的结果类型；`MotionAlgebraAction<T,M>` = "T 对 M 叉乘"的结果类型。
+- **为什么委托**：`MotionDense` 是通用 CRTP 基类，不知道结果具体类型；真正答案由**具体后端**给（视图→`MotionPlain`）。
+  故这两个偏特化**接住基类类型、转发给 `Derived`**，让"用基类类型查询"也能落到派生类的正确结果。
+- 解析链示例：`SE3GroupAction<MotionDense<MotionRef>>::ReturnType` →（本特化下放）→ `SE3GroupAction<MotionRef>::ReturnType`
+  →（MotionRef 特化）→ `MotionPlain`。**没有这个特化，用基类类型查询就会落到主模板而断链。**
+- 本质：**"遇到 `MotionDense<Derived>` 就还原成 `Derived`"**——是运算里 `derived()`（对象层解包）在**类型层**的对应物。
+
+> 两者共同点：**`traits` 是"类型关系的单一事实源"**。改一处 traits，所有引用它的 operator/方法自动跟着变（定制点，
+> 见 [§5](#5-traits-特化给类型挂元数据)）；配合 [§4 CRTP](#4-crtpbasederived-与-derived) 用基类参数 + traits 返回类型，实现"运算逻辑与类型细节解耦"。
+
+**典型出现处**：`spatial/motion-dense.hxx`、`force-dense.hxx` 的 operator 与 `SE3GroupAction`/`MotionAlgebraAction` 特化。
+
+---
+
+## 17. 用户自定义转换运算符 `operator T()`
+
+**是什么**：一个特殊成员函数，定义"如何把**本对象**转换成**类型 T**"，让本类型能当作 T 直接使用。
+
+```cpp
+// inertia.hxx（InertiaBase）：让 Inertia 能当 6×6 矩阵用
+operator Matrix6() const     // 转换运算符：目标类型 Matrix6 写在 operator 后，即返回类型（不另写）
+{
+  return matrix();           // 把紧凑的 (m,c,I_c) 展开成完整 6×6 空间惯量
+}
+```
+
+**效果**：编译器在需要 `Matrix6` 处**自动插入转换**：
+
+```cpp
+Inertia Y = ...;
+Matrix6 M = Y;                 // 隐式转换 = Y.matrix()
+someFuncTakingMatrix6(Y);      // 传参自动转
+```
+
+**与转换构造函数的方向相反**：
+- 转换**构造函数**（如 `MotionTpl(const MotionDense&)`）：`Target ← Source`（从别的类型**造出**本类型）；
+- 转换**运算符** `operator T()`：`Source → Target`（把本类型**转成**别的类型）。二者是"进/出"一对。
+
+**注意**：未加 `explicit` → **隐式转换**，可能悄悄发生；且每次都**物化一个 6×6**（`matrix()` 展开）有开销。
+故 Pinocchio 内部高性能路径仍直接用 $(m,c,I_c)$ 分量算（见 [空间代数解析 §6](空间代数运算解析.md)），这个口子留给"确实需要显式矩阵"的场合（调试/外部线代库对接/公式验证）。可加 `explicit operator T()` 关掉隐式转换。
+
+**典型出现处**：`spatial/inertia.hxx` 的 `operator Matrix6()`。
 
 ---
 

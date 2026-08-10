@@ -120,6 +120,7 @@ namespace pinocchio
     {
       return derived().matrix_impl();
     }
+    // ---- 隐式转换为 6×6 矩阵（注意拷贝开销）----
     operator Matrix6() const
     {
       return matrix();

@@ -241,6 +241,7 @@ namespace pinocchio
       return *this;
     }
 
+    // plus-equals 复合赋值：m_data += v.toVector()，零拷贝
     template<typename Vector6ArgType>
     MotionTpl & __pequ__(const MotionRef<Vector6ArgType> & v)
     {
@@ -248,6 +249,7 @@ namespace pinocchio
       return *this;
     }
 
+    // minus-equals 复合赋值：m_data -= v.toVector()，零拷贝
     template<int O2>
     MotionTpl & __mequ__(const MotionTpl<Scalar, O2> & v)
     {
