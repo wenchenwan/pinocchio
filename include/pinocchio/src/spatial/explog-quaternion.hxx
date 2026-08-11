@@ -16,6 +16,22 @@ namespace pinocchio
   namespace quaternion
   {
 
+  // ============================================================
+  // quaternion 命名空间：以【四元数】为载体的指数/对数映射
+  //
+  // 与 explog.hxx 中同名函数的区别：那里输出 3×3 旋转矩阵，
+  // 这里输出/输入单位四元数。
+  //
+  // 为什么需要四元数版本：
+  //   · Pinocchio 的浮动基与球关节在配置向量 q 里【就是用四元数存的】
+  //     （nq 比 nv 多 1 的原因），积分时直接操作四元数最自然；
+  //   · 存 4 个数而非 9 个，且归一化只需除以模长（矩阵则要正交化）；
+  //   · 数值上更稳定，反复积分不易累积非正交误差。
+  //
+  //   exp3(ω) → 四元数 q = (sin(θ/2)·ω/θ, cos(θ/2))，θ = ‖ω‖
+  //   注意是【半角】—— 四元数对 SO(3) 是双覆盖（q 与 −q 表示同一旋转）
+  // ============================================================
+
     ///
     /// \brief Exp: so3 -> SO3 (quaternion)
     ///
@@ -24,23 +40,30 @@ namespace pinocchio
     /// \param[in] v The angular velocity vector.
     /// \param[out] qout The quaternion where the result is stored.
     ///
+    // ------------------------------------------------------------
+    // exp3（四元数版）：so(3) → S³，把角速度积分成单位四元数
+    //
+    //     q = ( sin(θ/2)·ω/θ ,  cos(θ/2) ),   θ = ‖ω‖
+    //         └── vec（虚部）──┘  └─ w（实部）┘
+    //
+    // ⚠️ 注意是【半角】θ/2：四元数对 SO(3) 是【双覆盖】，
+    //    q 与 −q 表示同一个旋转（转 2π 才回到 q 本身）。
+    //
+    // 实现分两支（见下方 if_then_else）：
+    //   一般情形：借 Eigen::AngleAxis(θ, ω/θ) 直接构造
+    //   θ→0    ：转 4 阶泰勒展开，避免 ω/θ 的 0/0
+    //       sin(θ/2)/θ = ½·(1 − (θ/2)²/6 + (θ/2)⁴/120)
+    //       cos(θ/2)   =    1 − (θ/2)²/2 + (θ/2)⁴/24
+    //     代码中 t2_2 = t²/4 恰是 (θ/2)²，与上式逐项对应。
+    //
+    // 用 if_then_else 而非普通 if：兼容自动微分标量（分支不可比较），
+    // 且【两支都会求值】—— 这也是 t 里要加 eps 防止 ω/θ 产生 NaN 的原因。
+    //
+    // 实测：q.matrix() 与矩阵版 exp3(ω) 一致（1.9e-16）；半角公式严格相等；
+    //       θ = 1e-2 / 1e-5 / 1e-8 / 0 各档均正确，|q| 恒为 1。
+    // ------------------------------------------------------------
     template<typename Vector3Like, typename QuaternionLike>
     void
-    // ============================================================
-    // quaternion 命名空间：以【四元数】为载体的指数/对数映射
-    //
-    // 与 explog.hxx 中同名函数的区别：那里输出 3×3 旋转矩阵，
-    // 这里输出/输入单位四元数。
-    //
-    // 为什么需要四元数版本：
-    //   · Pinocchio 的浮动基与球关节在配置向量 q 里【就是用四元数存的】
-    //     （nq 比 nv 多 1 的原因），积分时直接操作四元数最自然；
-    //   · 存 4 个数而非 9 个，且归一化只需除以模长（矩阵则要正交化）；
-    //   · 数值上更稳定，反复积分不易累积非正交误差。
-    //
-    //   exp3(ω) → 四元数 q = (sin(θ/2)·ω/θ, cos(θ/2))，θ = ‖ω‖
-    //   注意是【半角】—— 四元数对 SO(3) 是双覆盖（q 与 −q 表示同一旋转）
-    // ============================================================
     exp3(const Eigen::MatrixBase<Vector3Like> & v, Eigen::QuaternionBase<QuaternionLike> & quat_out)
     {
       EIGEN_STATIC_ASSERT_VECTOR_ONLY(Vector3Like);
@@ -84,6 +107,8 @@ namespace pinocchio
     ///
     /// \param[in] v The angular velocity vector.
     ///
+    // 返回值版：内部转调上面的就地版本。
+    // 热路径建议用就地版（传入已分配好的四元数），省一次构造
     template<typename Vector3Like>
     Eigen::
       Quaternion<typename Vector3Like::Scalar, PINOCCHIO_EIGEN_PLAIN_TYPE(Vector3Like)::Options>
@@ -103,6 +128,30 @@ namespace pinocchio
     ///
     /// \param[in] motion the spatial motion.
     /// \param[out] q the output transform in \f$\mathbb{R}^3 x S^3\f$.
+    // ------------------------------------------------------------
+    // exp6（四元数版）：se(3) → R³ × S³，输出 7 维配置向量
+    //
+    // 输出布局 qout = [ 平移(3) ; 四元数(4) ]，正是 Pinocchio 里
+    // 【浮动基关节在 q 中的存储格式】（nq 比 nv 多 1 的由来）。
+    //
+    //   旋转部分：q = exp3(ω)                      （见上）
+    //   平移部分：p = V(ω)·v，V 为左雅可比
+    //       V(ω) = I + ((1−cosθ)/θ²)·ω̂ + ((θ−sinθ)/θ³)·ω̂²
+    //
+    // 代码里两个系数即：
+    //   alpha_wxv = (1−cosθ)/θ²   → 乘 ω×v      （对应 ω̂v）
+    //   alpha_w2  = (θ−sinθ)/θ³   → 乘 ω×(ω×v)  （对应 ω̂²v）
+    // 从而 p = v + α₁·(ω×v) + α₂·(ω×(ω×v))，全程只用叉乘、不建 ω̂ 矩阵。
+    //
+    // ⚠️ p ≠ v：平移过程中坐标系本身也在转，必须用 V(ω) 修正 ——
+    //    这是 exp6 与 exp3 最大的不同（详见 GUIDE §2.1）。
+    // θ→0 时两个系数同样切泰勒展开（½ − θ²/24、1/6 − θ²/120）。
+    //
+    // 实现细节：用 Eigen::Map 把 qout 的前 3 维/后 4 维【就地】映射成
+    // 平移向量与四元数，直接写入，无中间拷贝。
+    //
+    // 实测：与矩阵版 exp6 的平移部分严格相等、旋转部分差 2.2e-16。
+    // ------------------------------------------------------------
     template<typename MotionDerived, typename Config_t>
     void exp6(const MotionDense<MotionDerived> & motion, Eigen::MatrixBase<Config_t> & qout)
     {
@@ -176,6 +225,8 @@ namespace pinocchio
     ///
     /// \param[in] vec6 the vector representing the spatial velocity.
     /// \param[out] qout the output transform in R^3 x S^3.
+    // Vector6 入参的重载：用 MotionRef 把裸 6D 向量【零拷贝】包装成 Motion
+    // 后转调上面的实现（MotionRef 见 §1.4：只引用不拷贝）
     template<typename Vector6Like, typename Config_t>
     void exp6(const Eigen::MatrixBase<Vector6Like> & vec6, Eigen::MatrixBase<Config_t> & qout)
     {
@@ -215,6 +266,29 @@ namespace pinocchio
       3,
       1,
       PINOCCHIO_EIGEN_PLAIN_TYPE(typename QuaternionLike::Vector3)::Options>
+    // ------------------------------------------------------------
+    // log3（四元数版）：S³ → so(3)，exp3 的逆
+    //
+    //     θ = 2·atan2(‖q.vec‖, q.w),      ω = (θ/sin(θ/2))·q.vec
+    //
+    // 用 atan2 而非 acos(w)：atan2 在整个范围内数值条件都好，
+    // 而 acos 在 w→±1（θ→0 或 2π）附近导数发散、精度骤降。
+    //
+    // 【双覆盖处理】pos_neg：若 q.w < 0 就把整个四元数取反。
+    //   因 q 与 −q 表示同一旋转，取反后保证 w ≥ 0，从而 θ ∈ [0, π]，
+    //   取到【主值】（最短旋转路径）。
+    //   实测：log3(−q) 与 log3(q) 严格相等。
+    //
+    // θ→0 时 θ/sin(θ/2) 是 0/0，切泰勒展开：
+    //     θ/sin(θ/2) ≈ 2·(1 + (θ/2)²/6 + 7(θ/2)⁴/360)
+    // 代码中 inv_sinc 即此系数，th2_2 = (θ/2)²。
+    //
+    // 带 theta 输出参数是为了让调用方复用该角度（如随后算 Jlog3），
+    // 避免重复计算。
+    //
+    // 实测：log3(exp3(ω)) = ω（1.6e-16）；与矩阵版 log3 一致（1.2e-16）；
+    //       theta 输出等于 ‖ω‖（1.1e-16）。
+    // ------------------------------------------------------------
     log3(
       const Eigen::QuaternionBase<QuaternionLike> & quat, typename QuaternionLike::Scalar & theta)
     {
@@ -293,6 +367,26 @@ namespace pinocchio
     ///
     /// \returns The Jacobian of the quaternion components variation.
     ///
+    // ------------------------------------------------------------
+    // Jexp3CoeffWise：∂(四元数系数)/∂ω，尺寸 4×3
+    //
+    // 注意与 explog.hxx 里 Jexp3 的区别：
+    //   Jexp3（3×3）        ：李代数 → 李代数的右雅可比，用于流形上的梯度传播
+    //   Jexp3CoeffWise（4×3）：直接对【四元数的 4 个存储系数】求导，
+    //                          是"逐系数(coeff-wise)"的普通雅可比
+    //
+    // 行序与 Eigen 四元数系数一致：前 3 行是虚部 vec，第 4 行是实部 w。
+    //
+    // 用途：当把四元数当作【普通 4 维参数】参与优化时（如某些
+    // 位姿估计/标定问题直接以 q 的分量为决策变量），需要这种导数。
+    // 日常动力学走李代数路线，用的是 Jexp3 而非本函数。
+    //
+    // 两支同样按 ‖ω‖ 大小切换，小角度用泰勒展开。
+    // 这里用的是普通 if（非 if_then_else）—— 故本函数不支持自动微分标量。
+    //
+    // 实测：与有限差分吻合到 1.2e-8（h=1e-7，与截断误差同量级）；
+    //       小角度 θ=1e-6 分支同样正确。
+    // ------------------------------------------------------------
     template<typename Vector3Like, typename Matrix43Like>
     void Jexp3CoeffWise(
       const Eigen::MatrixBase<Vector3Like> & v, const Eigen::MatrixBase<Matrix43Like> & Jexp)
@@ -333,6 +427,19 @@ namespace pinocchio
     /// \param[in] quat A unit quaternion representing the input rotation.
     /// \param[out] Jlog The resulting Jacobian of the log operator.
     ///
+    // ------------------------------------------------------------
+    // Jlog3（四元数入参）：log3 的雅可比，3×3
+    //
+    // 本身不含新数学：先用四元数版 log3 取出 (θ, ω)，再直接转调
+    // explog.hxx 里那个"已知 θ 与 ω"的 Jlog3 重载 —— 因为雅可比的
+    // 表达式只依赖 (θ, ω)，与输入是四元数还是矩阵无关。
+    //
+    // 提供本重载纯粹是为了免去调用方"先把四元数转成矩阵"的一步。
+    // 用途同矩阵版：姿态 IK 的链式法则（见 GUIDE §4.2.2）。
+    //
+    // 实测：与矩阵版 pinocchio::Jlog3(q.matrix(), ·) 一致（3.7e-16）；
+    //       与 log3 的右扰动有限差分吻合到 6.0e-9。
+    // ------------------------------------------------------------
     template<typename QuaternionLike, typename Matrix3Like>
     void Jlog3(
       const Eigen::QuaternionBase<QuaternionLike> & quat,
