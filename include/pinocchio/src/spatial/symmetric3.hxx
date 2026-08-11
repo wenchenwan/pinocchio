@@ -172,6 +172,9 @@ namespace pinocchio
       m_data.fill(value);
     }
 
+    // ---- 3×3 对称矩阵求逆：伴随矩阵(cofactor) / 行列式，闭式解 ----
+    // S⁻¹ = adj(S)/det(S)。因对称，只需算 6 个余子式（上三角），
+    // 下三角对称填。det 用第一行按余子式展开：det = Σ a_1j·C_1j。
     template<typename Matrix3Like>
     void inverse(const Eigen::MatrixBase<Matrix3Like> & res_) const
     {
@@ -179,6 +182,7 @@ namespace pinocchio
       const Scalar &a11 = m_data[0], a21 = m_data[1], a22 = m_data[2], a31 = m_data[3],
                    a32 = m_data[4], a33 = m_data[5];
 
+      // 余子式（伴随矩阵元素）：res(i,j) = C_ij，对称故上下三角一次算
       res(0, 0) = a33 * a22 - a32 * a32;
       res(1, 0) = res(0, 1) = -(a33 * a21 - a32 * a31);
       res(2, 0) = res(0, 2) = a32 * a21 - a22 * a31;
@@ -186,8 +190,8 @@ namespace pinocchio
       res(2, 1) = res(1, 2) = -(a32 * a11 - a21 * a31);
       res(2, 2) = a22 * a11 - a21 * a21;
 
-      const Scalar det = a11 * res(0, 0) + a21 * res(0, 1) + a31 * res(0, 2);
-      res /= det;
+      const Scalar det = a11 * res(0, 0) + a21 * res(0, 1) + a31 * res(0, 2); // 沿第一列展开
+      res /= det;                                                            // S⁻¹ = adj/det
     }
 
     Matrix3 inverse() const
@@ -197,6 +201,10 @@ namespace pinocchio
       return res;
     }
 
+    // ---- SkewSquare(v)：表示对称矩阵 [v]×² （叉乘平方，本身对称） ----
+    // [v]×² = v vᵀ − ‖v‖²·I，展开各元即下面 6 个数。
+    // 用途：平行轴定理项 —— 惯量在原点与质心之间平移时的修正 −m[c]×²。
+    // 用轻量代理类（不立即算成 Symmetric3）+ operator- 融合，见下。
     struct SkewSquare
     {
       const Vector3 & v;
@@ -207,10 +215,12 @@ namespace pinocchio
       operator Symmetric3Tpl() const
       {
         const Scalar &x = v[0], &y = v[1], &z = v[2];
+        // [v]×² 的 6 个独立元（对角为 −(其余两分量平方和)）
         return Symmetric3Tpl(-y * y - z * z, x * y, -x * x - z * z, x * z, y * z, -x * x - y * y);
       }
     }; // struct SkewSquare
 
+    // S − [v]×²：把"减去叉乘平方"融合成一趟（不先物化 [v]×²），平行轴定理常用
     Symmetric3Tpl operator-(const SkewSquare & v) const
     {
       const Scalar &x = v.v[0], &y = v.v[1], &z = v.v[2];
@@ -231,6 +241,8 @@ namespace pinocchio
       return *this;
     }
 
+    // ---- AlphaSkewSquare(m,v)：表示 m·[v]×²（带标量系数的叉乘平方）----
+    // 平行轴项常带质量系数：−m[c]×²。同样用代理类 + operator- 融合，避免临时对象。
     struct AlphaSkewSquare
     {
       const Scalar & m;
@@ -313,6 +325,7 @@ namespace pinocchio
         b * d + c * e + e * f, d * d + e * e + f * f);
     }
 
+    // ---- 展开成完整 3×3 对称矩阵（需要显式矩阵时用；operator Matrix3() 隐式转换）----
     Matrix3 matrix() const
     {
       Matrix3 res;
@@ -332,6 +345,10 @@ namespace pinocchio
       return matrix();
     }
 
+    // ---- vtiv(v) = vᵀ S v（二次型，标量）----
+    // 对称矩阵二次型 = 对角项 + 2×非对角项：
+    //   Sxx x² + Syy y² + Szz z² + 2(Sxy xy + Sxz xz + Syz yz)
+    // 直接用 6 个存储元算，不物化 3×3，运算量最小。用途：ωᵀ I_c ω（动能项）。
     Scalar vtiv(const Vector3 & v) const
     {
       const Scalar & x = v[0];
@@ -345,8 +362,8 @@ namespace pinocchio
       const Scalar yz = y * z;
       const Scalar zz = z * z;
 
-      return m_data(0) * xx + m_data(2) * yy + m_data(5) * zz
-             + 2. * (m_data(1) * xy + m_data(3) * xz + m_data(4) * yz);
+      return m_data(0) * xx + m_data(2) * yy + m_data(5) * zz            // 对角项
+             + 2. * (m_data(1) * xy + m_data(3) * xz + m_data(4) * yz);  // 2×非对角项
     }
 
     ///
@@ -379,6 +396,8 @@ namespace pinocchio
       const typename Vector3::RealScalar & v1 = v[1];
       const typename Vector3::RealScalar & v2 = v[2];
 
+      // M = [v]× S：对 S 的每一列做 v×（结果一般【不再对称】，故返回满 3×3）
+      // 直接用 v 与 S 的 6 个元展开，不构造 [v]× 也不做通用矩阵乘
       Matrix3 & M_ = PINOCCHIO_EIGEN_CONST_CAST(Matrix3, M);
       M_(0, 0) = d * v1 - b * v2;
       M_(1, 0) = a * v2 - d * v0;
@@ -440,6 +459,7 @@ namespace pinocchio
       const typename Vector3::RealScalar & v1 = v[1];
       const typename Vector3::RealScalar & v2 = v[2];
 
+      // M = S [v]×：对 S 的每一行做 ×v（= (−[v]× S)ᵀ）。同样返回满 3×3
       Matrix3 & M_ = PINOCCHIO_EIGEN_CONST_CAST(Matrix3, M);
       M_(0, 0) = b * v2 - d * v1;
       M_(1, 0) = c * v2 - e * v1;
@@ -498,6 +518,8 @@ namespace pinocchio
       return *this;
     }
 
+    // ---- rhsMult: vout = S · vin（对称矩阵 × 向量）----
+    // 直接用 6 个存储元展开（3 行各 3 项），不物化 3×3。operator* 转调它。
     template<typename V3in, typename V3out>
     static void rhsMult(
       const Symmetric3Tpl & S3,
@@ -509,9 +531,9 @@ namespace pinocchio
 
       V3out & vout_ = PINOCCHIO_EIGEN_CONST_CAST(V3out, vout);
 
-      vout_[0] = S3.m_data(0) * vin[0] + S3.m_data(1) * vin[1] + S3.m_data(3) * vin[2];
-      vout_[1] = S3.m_data(1) * vin[0] + S3.m_data(2) * vin[1] + S3.m_data(4) * vin[2];
-      vout_[2] = S3.m_data(3) * vin[0] + S3.m_data(4) * vin[1] + S3.m_data(5) * vin[2];
+      vout_[0] = S3.m_data(0) * vin[0] + S3.m_data(1) * vin[1] + S3.m_data(3) * vin[2]; // 行0
+      vout_[1] = S3.m_data(1) * vin[0] + S3.m_data(2) * vin[1] + S3.m_data(4) * vin[2]; // 行1
+      vout_[2] = S3.m_data(3) * vin[0] + S3.m_data(4) * vin[1] + S3.m_data(5) * vin[2]; // 行2
     }
 
     template<typename V3>
@@ -534,6 +556,9 @@ namespace pinocchio
     //   return r;
     // }
 
+    // ---- (i,j) 元素访问：从 6 元紧凑存储反查 ----
+    // 列主序上三角打包：索引 0,1,2,3,4,5 ↔ (0,0),(1,0),(1,1),(2,0),(2,1),(2,2)。
+    // i,j 都不为 2 时下标 = i+j；含 2 时需 +1 修正（跳过打包间隙）。
     const Scalar & operator()(const int i, const int j) const
     {
       return ((i != 2) && (j != 2)) ? m_data[i + j] : m_data[i + j + 1];
@@ -561,6 +586,8 @@ namespace pinocchio
   public: // private:
     /** \brief Computes L for a symmetric matrix A.
      */
+    // decomposeltI：rotate 的辅助，把 S 拆出一个 3×2 中间量 L，
+    // 使 R S Rᵀ 能用更少乘法算出（见 rotate 里的乘法/加法计数注释）。
     Matrix32 decomposeltI() const
     {
       Matrix32 L;
@@ -569,6 +596,10 @@ namespace pinocchio
       return L;
     }
 
+    // ---- rotate(R): 合同变换 R S Rᵀ（把惯量从一个坐标系旋到另一个）----
+    // 结果仍对称，故返回 Symmetric3。用 decomposeltI 分解 + 分块乘，
+    // 比朴素 R·S·Rᵀ（两次 3×3 乘）省一半以上乘法（代码里标了各步 m/a 计数）。
+    // 用途：Inertia::se3Action 里把 I_c 旋到新系（R I_c Rᵀ）。
     /* R*S*R' */
     template<typename D>
     Symmetric3Tpl rotate(const Eigen::MatrixBase<D> & R) const
