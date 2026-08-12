@@ -110,41 +110,178 @@ struct ModelTpl
 
 `traits<ModelTpl>` 暴露 `Scalar`/`Options`/`Data`/`JointCollection`。注意 **`Data` 类型是从 `Model` 反查出来的**（`traits<ModelTpl>::Data`），所以 `Model` 与 `Data` 严格配对。
 
-### 2.2 三套维度与索引体系（关键）
+### 2.2 四套维度与索引体系（关键）
 
-这是理解 Pinocchio 数据布局的钥匙。每个关节在三个不同维度的**全局向量**里各占一段：
+这是理解 Pinocchio 数据布局的钥匙。每个关节在几个不同维度的**全局向量**里各占一段：
 
-| 空间 | 维度符号 | 每关节段长 / 起点 | 含义 |
-|------|----------|-------------------|------|
-| **位形空间** q | `nq` | `nqs[i]` / `idx_qs[i]` | 位形向量维度。可 > nv（如球副 nq=4 四元数、nv=3） |
-| **速度/切空间** v | `nv` | `nvs[i]` / `idx_vs[i]` | 广义速度、力矩、加速度维度 |
-| **雅可比扩展空间** | `nvExtended` | `nvExtendeds[i]` / `idx_vExtendeds[i]` | mimic 等关节雅可比列数 ≠ nv 时用 |
+| 空间 | 总维度 | 每关节段长 / 起点 | 含义 |
+|------|--------|-------------------|------|
+| **位形空间** $q$ | `nq` | `nqs[i]` / `idx_qs[i]` | 位形向量维度。可 > nv（球副 nq=4、nv=3） |
+| **速度/切空间** $v$ | `nv` | `nvs[i]` / `idx_vs[i]` | 广义速度、力矩、加速度维度 |
+| **扩展速度空间** | `nvExtended` | `nvExtendeds[i]` / `idx_vExtendeds[i]` | **展开 mimic 后**的速度维度 |
+| 树节点计数 | `njoints` / `nbodies` / `nframes` | — | 关节数（含 universe）/ 刚体数 / 坐标系数 |
 
-> **为什么 nq≠nv**：位形住在**弯曲流形**上（球副的姿态是 SO(3)，用 4 维四元数存但只有 3 个自由度），速度住在**切空间**（3 维）。二者的桥是李群 exp/log（见 §10）。
+**为什么 $n_q \neq n_v$**：位形住在**弯曲流形**上（球副姿态属于 $SO(3)$，用 4 维四元数存但只有 3 个自由度），
+速度住在**切空间**。二者的桥是李群 exp/log（见 §10）。
 
-`addJoint` 里维护这些：`nq += joint_nq; idx_qs.push_back(...)` 等，并用 `jmodel.setIndexes(joint_id, nq, nv, nvExtended)` 把全局起点写回关节对象。
+**`nvExtended` 是什么**（现有资料常缺）：mimic（耦合）关节被折叠后，`nv` 只数**独立**自由度，
+而 `nvExtended` 数的是**展开后**的自由度。实测（Baxter，含两对 mimic 夹爪）：
 
-### 2.3 树结构字段
+| 模型 | `nq` | `nv` | `nvExtended` |
+|---|---|---|---|
+| `buildModelFromUrdf(path)`（忽略 mimic） | 19 | 19 | 19 |
+| `buildModelFromUrdf(path, mimic=True)` | 17 | **17** | **19** |
 
-- `parents[i]`：关节 i 的父关节（`universe`=0 是根）。
-- `children[i]`：子关节列表。
-- `supports[j]`：从 `universe` 到 j 的路径（含两端）——雅可比稀疏性、CRBA 的基础。
-- `subtrees[j]`：j 支撑的整棵子树（含 j 自己）——CRBA 复合惯量累加范围。
-- `sparsity_pattern_vector[i]` / `span_indexes_vector[i]`：关节 i 对应雅可比**哪些列非零**（布尔向量 / 索引列表）。
-- `jointPlacements[i]`：关节 i 相对父关节坐标系的固定位姿 `^{parent}M_i`（$X_T$，见 §13）。
-- `inertias[i]`：关节 i 支撑的刚体空间惯量（`appendBodyToJoint` 累加进来）。
-- `mimicking_joints`/`mimicked_joints`/`mimic_joint_supports`：镜像关节的绑定关系。
+即 mimic 模型少了 2 个独立自由度，但内部仍需按 19 维展开来做递推（然后用传动矩阵 $G$ 投影回 17 维）。
+无 mimic 时三者一致，故平时感觉不到它。
 
-### 2.4 关键方法
+`addJoint` 里同步维护这些：`nq += joint_nq; idx_qs.push_back(...)`，
+并用 `jmodel.setIndexes(joint_id, nq, nv, nvExtended)` 把全局起点**写回关节对象自身**——
+这就是关节能用 `jmodel.idx_q()` 从全局 `q` 里取出自己那几维的机制。
 
-- **`addJoint(parent, jmodel, placement, name, ...)`**：向树追加关节。**必须深度优先顺序**添加。内部：`njoints++` → `joints.push_back(JointModel(jmodel.derived()))` → `setIndexes` → 累加 nq/nv → `conservativeResize` 各种极限向量并写入 → 更新 `subtrees`/`supports`/稀疏模式 → 若是 mimic 记录绑定。有多个重载（是否给力/速/位极限、摩擦、阻尼），最终都汇聚到那个 13 参数的总实现。
-- **`appendBodyToJoint(joint_id, Y, placement)`**：把刚体惯量 `Y`（换算到关节系后）加到 `inertias[joint_id]`。
-- **`addFrame(frame, append_inertia)`**：注册操作坐标系；若带惯量且 `append_inertia`，惯量并入父关节。
-- **`createData()`**：按当前 Model 分配一个匹配的 `Data`。
-- **`cast<NewScalar>()`**：逐字段 `.cast<>()`，把整个模型换标量类型（float↔double↔ADScalar，autodiff 用；见 [源码解析.md](源码解析.md) 的 cast 条目）。
-- **`check(checker)`**：模板化的模型合法性校验钩子。
+### 2.3 全部数据字段（按用途分组）
 
-`gravity`（`Motion`，默认 `(0,0,-9.81)` 线性部分）与静态成员 `gravity981` 也在此定义。
+`ModelTpl` 有 40+ 个公开字段。按用途归类如下（可当速查表用）：
+
+**① 维度与计数**
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `nq` / `nv` / `nvExtended` | `int` | 三套总维度（见上） |
+| `njoints` | `int` | 关节数，**含 universe(0)** |
+| `nbodies` | `int` | 刚体数 |
+| `nframes` | `int` | 坐标系数 |
+| `name` | `std::string` | 模型名 |
+
+**② 逐关节的静态属性**（长度均为 `njoints`）
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `joints` | `JointModelVector` | 关节模型对象（variant，见 §5） |
+| `jointPlacements[i]` | `SE3` | 关节 $i$ 相对**父关节系**的固定位姿 ${}^{\lambda(i)}M_i$ |
+| `inertias[i]` | `Inertia` | 关节 $i$ 所驮刚体的空间惯量（`appendBodyToJoint` 累加而来） |
+| `names[i]` | `std::string` | 关节名（`getJointId` 的反查表） |
+| `idx_qs` / `nqs` | `vector<int>` | 关节 $i$ 在 $q$ 中的起点与长度 |
+| `idx_vs` / `nvs` | `vector<int>` | 关节 $i$ 在 $v$ 中的起点与长度 |
+| `idx_vExtendeds` / `nvExtendeds` | `vector<int>` | 扩展速度空间中的起点与长度 |
+
+**③ 树拓扑**（这组是所有 $O(n)$ 算法的稀疏性来源）
+
+| 字段 | 含义 | 实测示例（样例人形，关节 5 = `rleg_elbow_joint`） |
+|---|---|---|
+| `parents[i]` | 父关节，`universe`=0 为根 | `parents[5] = 4` |
+| `children[i]` | 子关节列表 | `children[5] = [6]` |
+| `supports[j]` | 从根到 $j$ 的**路径**（含两端） | `supports[5] = [0,1,2,3,4,5]` |
+| `subtrees[j]` | 以 $j$ 为根的**整棵子树**（含自身） | `subtrees[5] = [5,6,7]` |
+| `sparsity_pattern_vector[i]` | 关节 $i$ 的雅可比**哪些列非零**（布尔） | — |
+| `span_indexes_vector[i]` | 同上，索引列表形式 | — |
+
+> **怎么记**：`supports` 往**上**看（我依赖谁）→ 雅可比列稀疏性；
+> `subtrees` 往**下**看（谁依赖我）→ CRBA 复合惯量的累加范围（见 [空间代数 §6.3](空间代数运算解析.md)）。
+
+**④ 关节限位与驱动参数**（长度 `nv` 或 `nq`）
+
+| 字段 | 维度 | 含义 |
+|---|---|---|
+| `lowerPositionLimit` / `upperPositionLimit` | `nq` | 位置限位。`randomConfiguration` 在此范围采样 |
+| `positionLimitMargin` | `nq` | 位置限位的安全裕度 |
+| `lowerVelocityLimit` / `upperVelocityLimit` | `nv` | 速度限位 |
+| `lowerEffortLimit` / `upperEffortLimit` | `nv` | 力矩限位 |
+| `lowerDryFrictionLimit` / `upperDryFrictionLimit` | `nv` | 库仑（干）摩擦上下限 |
+| `damping` | `nv` | 粘滞阻尼系数 |
+| `armature` | `nv` | **电枢惯量**：加到 $M(q)$ 对角上的等效转子惯量 |
+| `rotorInertia` / `rotorGearRatio` | `nv` | 转子惯量与减速比（`armature` 的来源） |
+
+> ⚠️ **浮动基的位置限位默认是 $\pm\infty$**，所以 `randomConfiguration` 在人形上会失败——
+> 必须先手工设 `model.lowerPositionLimit[:7] = -1` 之类（见 `examples/run-algo-in-parallel.py`）。
+
+> **`armature` 的实际意义**：谐波减速器的转子折算到关节侧的惯量为 $n^2 I_{\text{rotor}}$（$n$ 为减速比），
+> 对高减速比关节这一项可能与连杆惯量同量级。忽略它会让模型显著偏软。
+
+**⑤ mimic（耦合关节）**
+
+| 字段 | 含义 |
+|---|---|
+| `mimicking_joints` | 跟随者关节 ID 列表（实测 Baxter：`[10, 19]`） |
+| `mimicked_joints` | 被跟随者 ID 列表（实测：`[9, 18]`，与上一一对应） |
+| `mimic_joint_supports` | mimic 关节的支撑路径 |
+
+**⑥ 其余**
+
+| 字段 | 含义 |
+|---|---|
+| `frames` | 所有 Frame（见 §4） |
+| `referenceConfigurations` | 命名配置字典（SRDF 的 `half_sitting` 等） |
+| `gravity` | 重力，`Motion` 类型，默认线性部分 $(0,0,-9.81)$ |
+| `gravity981` | 静态常量 $(0,0,-9.81)$ |
+
+> **重力为什么是 `Motion` 而不是 `Vector3`**：RNEA 把根节点加速度初始化为 $a_0 = -g$，
+> 让重力**沿递推自动传遍全身**（见 [GUIDE §4.3.2](../PINOCCHIO_GUIDE.md#432-第一趟正向传播运动学根--叶)）。
+> 存成 `Motion` 才能直接参与空间加速度递推。把 `gravity` 置零即可做"零重力"仿真。
+
+### 2.4 全部方法
+
+**① 构造与赋值**
+
+| 方法 | 说明 |
+|---|---|
+| `ModelTpl()` | 默认构造：建立 `universe`（关节 0），`nq=nv=0`, `njoints=1` |
+| `ModelTpl(const ModelTpl&)` | 拷贝 |
+| `ModelTpl(const ModelTpl<S,O,OtherCollection>&)` | 跨**关节集合**转换 |
+| `operator=` ×2 | 同上两种赋值 |
+| `operator==` / `!=` | 逐字段比较（`mimic_dynamics.py` 用它验证手工 mimic 与 URDF 解析结果一致） |
+| `cast<NewScalar>()` | 换标量类型，autodiff/多精度的入口（见 [GUIDE §11.2](../PINOCCHIO_GUIDE.md#112-tpl-模板--context-默认标量)） |
+
+**② 建树**
+
+```cpp
+JointIndex addJoint(JointIndex parent, const JointModelBase<D>& jmodel,
+                    const SE3& joint_placement, const std::string& name, ...);
+```
+
+**7 个重载**，参数逐级增加（是否给力矩/速度/位置限位、摩擦、阻尼），最终都汇聚到同一个总实现。
+内部流程：
+
+```
+njoints++  →  joints.push_back(...)  →  jmodel.setIndexes(id, nq, nv, nvExtended)
+          →  累加 nq/nv/nvExtended，push idx_qs/nqs/...
+          →  conservativeResize 各限位向量并写入
+          →  parents.push_back / children[parent].push_back
+          →  更新 supports、subtrees、sparsity_pattern_vector
+          →  若是 mimic 关节，登记 mimicking/mimicked_joints
+```
+
+> ⚠️ **必须按深度优先顺序添加**：`parents[i] < i` 是所有递推算法的前提
+> （正向遍历 `for i=1..njoints` 时父节点必已算完）。传入未注册的 `parent` 会破坏这个不变量。
+
+| 其余建树方法 | 说明 |
+|---|---|
+| `appendBodyToJoint(joint_id, Y, placement)` | 把刚体惯量 $Y$ 变换到关节系后**累加**到 `inertias[joint_id]`（多个几何体可叠加到同一关节） |
+| `addJointFrame(joint_index, previous_frame_index)` | 为关节自动注册一个 `JOINT` 类型的 Frame |
+| `addBodyFrame(...)` | 注册 `BODY` 类型 Frame |
+| `addFrame(frame, append_inertia=true)` | 注册任意 Frame；若带惯量且 `append_inertia=true`，惯量并入父关节 |
+| `addJointIndexToParentSubtrees(joint_id)` | 内部维护 `subtrees` 用 |
+
+**③ 名称查询**（URDF 名 ↔ 内部索引）
+
+| 方法 | 说明 |
+|---|---|
+| `getJointId(name)` / `existJointName(name)` | 关节名 → ID。**查不到返回 `njoints`（不抛异常）**，故批量转换时应先 `exist*` 判断（`build-reduced-model.py` 就是这么写的） |
+| `getFrameId(name, type)` / `existFrame(name, type)` | Frame 名 → ID，可按类型过滤 |
+| `getBodyId(name)` / `existBodyName(name)` | 刚体名 → ID |
+
+> ⚠️ URDF 里的**固定关节**在 Pinocchio 中不是关节而是 Frame（见 §4），
+> 所以很多"关节名"必须用 `getFrameId` 而非 `getJointId` 才查得到。
+
+**④ 校验与工具**
+
+| 方法 | 说明 |
+|---|---|
+| `createData()` | 按当前 Model 分配配套 `Data`。**Model 改了必须重建 Data** |
+| `check()` / `check(data)` / `check(checker)` | 模型自洽性校验；带 `Data` 的版本检查二者是否匹配 |
+| `hasConfigurationLimit()` | 返回长度 `nq` 的 `vector<bool>`：每个位形分量是否**有**限位（浮动基的四元数分量为 false） |
+| `hasConfigurationLimitInTangent()` | 同上但按 `nv` 维 |
+| `getChildJoints()` | 取叶子关节列表 |
 
 ---
 
@@ -152,11 +289,40 @@ struct ModelTpl
 
 `src/multibody/data.hxx`。如果说 `Model` 是"机器人的图纸"，`Data` 就是**"算草稿纸"**——~150 个预分配的字段，让 RNEA/CRBA/ABA 等算法**零动态分配**地反复运行。字段按算法族分组：
 
+#### 命名约定（读懂 Data 的第一把钥匙）
+
+`Data` 字段名遵循几条固定前后缀规则，认得它们就能猜出大半字段的含义：
+
+| 记号 | 含义 | 例 |
+|------|------|-----|
+| 前缀 `o` | **世界系（origin）表达** | `v[i]` 是 LOCAL 速度，`ov[i]` 是同一速度在世界系的表达 |
+| 前缀 `li` | local relative to parent | `liMi[i]` = ${}^{\lambda(i)}M_i$ |
+| 后缀 `_fromRow` | 按**自由度行**（而非关节）重排的索引 | `parents_fromRow` |
+| 后缀 `_augmented` | mimic 展开后的增广版本 | `joints_augmented` |
+| `d` 前缀 / `_d*` | 时间导数或偏导 | `dJ`、`dtau_dq` |
+| `crb` | Composite Rigid Body | `Ycrb`、`oYcrb` |
+| `_in` | 算法入参的缓存副本 | `q_in`、`v_in` |
+
+> **为什么同一物理量要存 LOCAL 和 WORLD 两份**：RNEA 的递推在 LOCAL 系最省
+> （关节子空间 $S$ 是常向量），但导数与质心量在世界系表达更方便。二者用伴随变换互转
+> （见 [空间代数 §4](空间代数运算解析.md)），预存两份是**空间换时间**。
+
 ### 3.1 运动学量（每关节一个，`std::vector` 长度 = njoints）
-- `oMi[i]`：关节 i 在世界系的位姿 `^0M_i`（forwardKinematics 主输出）。
-- `liMi[i]`：关节 i 相对父关节的位姿 `^{parent}M_i`（含关节运动）。
-- `v[i]`/`a[i]`：关节 i 的空间速度/加速度（LOCAL）；`ov[i]`/`oa[i]`：世界系版本。
-- `oMf[i]`：操作坐标系在世界系的位姿（updateFramePlacements 输出）。
+
+| 字段 | 含义 | 由谁写入 |
+|---|---|---|
+| `oMi[i]` | 关节 $i$ 在世界系的位姿 ${}^0M_i$ | `forwardKinematics` 主输出 |
+| `liMi[i]` | 关节 $i$ 相对父关节的位姿 ${}^{\lambda(i)}M_i$（**含**关节自由度产生的变换） | `forwardKinematics` |
+| `v[i]` / `ov[i]` | 空间速度（LOCAL / WORLD） | `forwardKinematics(q,v)` |
+| `a[i]` / `oa[i]` | 空间加速度（LOCAL / WORLD） | `forwardKinematics(q,v,a)` |
+| `a_gf[i]` / `oa_gf[i]` | **含重力**的加速度（gf = gravity field） | RNEA。构造时 `a_gf[0] = -model.gravity` |
+| `oa_drift` | 漂移加速度 $\dot J v$（零加速度下的 $a$） | 约束动力学 |
+| `oMf[i]` | Frame 在世界系的位姿 | `updateFramePlacements` |
+| `joints` / `joints_augmented` | 各关节的 `JointData`（缓存 $S$、$M_J$ 等） | `jmodel.calc()` |
+| `q_in` / `v_in` / `a_in` / `tau_in` | 入参缓存 | 各算法入口 |
+
+> `a_gf[0] = -model.gravity` 这一行是**重力注入的全部机密**：把根节点加速度设为 $-g$，
+> 递推自然把重力效应传遍全身，无需在每个连杆单独加重力项。
 
 ### 3.2 力与动量
 - `f[i]`/`of[i]`：作用在关节 i 上的空间力（RNEA 反向递推）。
@@ -171,12 +337,36 @@ struct ModelTpl
 - `Ycrb[i]`/`oYcrb[i]`：复合刚体惯量（子树累加，CRBA 核心，见 [空间代数解析 §6.3](空间代数运算解析.md)）；`dYcrb`/`doYcrb` 其导数。
 
 ### 3.4 ABA（前向动力学）
-- `Yaba[i]`/`oYaba[i]`：铰接体惯量（Articulated Body Inertia）。
-- `u[i]`/`U`/`D`/`Dinv`：ABA 三趟递推的偏置力与 $U D^{-1} U^\top$ 分解量。
-- `ddq`：关节加速度输出。
 
-### 3.5 稀疏 Cholesky（`M = U D Uᵀ`）
-- `U`（单位上三角）/`D`/`Dinv`/`tmp`；`parents_fromRow`/`nvSubtree_fromRow`/`supports_fromRow` 是**按行（自由度）而非按关节**重排的树结构，供稀疏分解按 DoF 遍历。
+| 字段 | 含义 |
+|---|---|
+| `Yaba[i]` / `oYaba[i]` | **铰接体惯量** $I^A_i$（子关节自由响应后的等效惯量，见 [GUIDE §4.4.2](../PINOCCHIO_GUIDE.md#442-核心概念关节化体惯量)） |
+| `u[i]` | 关节 $i$ 的偏置力项 |
+| `U` / `D` / `Dinv` | Schur 补分解量：$U=I^A S$、$D=S^\top I^A S$、`Dinv`$=D^{-1}$ |
+| `SDinv` / `UDinv` / `IS` | 递推中间矩阵（避免重复乘法） |
+| `ddq` | **关节加速度输出** |
+| `B` / `vxI` / `Ivx` | $v\times^*I$、$I\times v$ 等惯量时间导数（解析梯度用） |
+
+> `Yaba` 与 `Ycrb` 的区别正是 ABA 与 CRBA 的分野：**`crb` 假设子关节锁死**（对应 $M$），
+> **`aba` 假设子关节自由响应**（对应 $M^{-1}$）。
+
+### 3.5 稀疏 Cholesky（$M = U D U^\top$）
+
+| 字段 | 含义 |
+|---|---|
+| `U` | 单位上三角因子 |
+| `D` / `Dinv` | 对角块及其逆 |
+| `tmp` | 求解时的工作向量 |
+| `parents_fromRow[k]` | 自由度 $k$ 的"父自由度" |
+| `nvSubtree_fromRow[k]` | 从行 $k$ 起子树占的自由度数 |
+| `supports_fromRow[k]` | 行 $k$ 的支撑集 |
+| `start_idx_v_fromRow` / `end_idx_v_fromRow` | 行区间边界 |
+| `mimic_parents_fromRow` / `non_mimic_parents_fromRow` | mimic 场景下的分支版本 |
+
+**为什么要 `_fromRow` 这一套**：Model 里的 `parents`/`subtrees` 是**按关节**组织的，
+而稀疏 Cholesky 要**按自由度行**遍历（一个球关节占 3 行）。构造 `Data` 时由
+`computeParents_fromRow` / `computeSupports_fromRow` / `computeNvSubtree` 一次性把
+关节级拓扑"展开"到自由度级，之后分解直接按行跳转，无需反复换算。
 
 ### 3.6 解析导数（RNEA/ABA 对 q,v,τ 的偏导）
 - `dtau_dq`/`dtau_dv`：逆动力学导数。
@@ -199,257 +389,623 @@ struct ModelTpl
 
 ## 4. `FrameTpl` / `ModelItem`：坐标系与树节点基类
 
-### 4.1 `ModelItem`（`model-item.hxx`）
-`Frame`（及未来的其他树挂件）的公共基类，四个字段：
-`name`、`parentJoint`（挂在哪个关节）、`parentFrame`（父坐标系，多为文档/第三方用）、`placement`（相对父关节系的固定位姿 SE3）。
+### 4.1 `ModelItem`（`model-item.hxx`，79 行）
 
-### 4.2 `FrameTpl`（`frame.hxx`）
-在 `ModelItem` 基础上加 `FrameType type` 和 `Inertia inertia`。
+`Frame`（及未来其他"挂在树上的东西"）的公共基类，只有四个字段：
 
-**Frame vs Joint 的区别**（常见困惑，另见 [源码解析.md](源码解析.md) §3.1）：
-- **Joint** 是运动学树的**真实节点**，有自由度、参与所有动力学递推；`oMi[i]` 是它的位姿。
-- **Frame** 是**附着在某个关节上的固定标记**（`placement` 是常量），本身**无自由度**、不参与递推；它的位姿 `oMf = oMi[parentJoint] * placement` 是**事后**由关节位姿算出来的。
-- `FrameType`：`OP_FRAME`（用户操作系）、`JOINT`（关节系的冗余镜像）、`FIXED_JOINT`（URDF 里被折叠掉的固定关节——**Pinocchio 不把固定关节放进运动学树，而是降级成 Frame**）、`BODY`（连杆的惯量/视觉/碰撞系）、`SENSOR`。
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `name` | `std::string` | 名称 |
+| `parentJoint` | `JointIndex` | **挂在哪个关节上**（决定它随谁运动） |
+| `parentFrame` | `FrameIndex` | 父坐标系（主要供 URDF 层级记录/第三方使用，不参与运算） |
+| `placement` | `SE3` | 相对**父关节系**的固定位姿 ${}^iM_f$（常量，不随 $q$ 变） |
 
-这正是 URDF 里"很多 link/固定 joint"被压缩成"少数活动关节 + 一堆 Frame"的机制。
+抽出这个基类是为了让未来的传感器、附着体等复用同一套"挂载"语义。
+
+### 4.2 `FrameTpl`（`frame.hxx`，223 行）
+
+在 `ModelItem` 基础上增加两个字段：
+
+| 字段 | 含义 |
+|---|---|
+| `type` | `FrameType` 枚举，见下 |
+| `inertia` | 该 Frame 携带的惯量（`addFrame(frame, append_inertia=true)` 时会并入父关节） |
+
+**方法**（都很轻）：
+
+| 方法 | 说明 |
+|---|---|
+| `FrameTpl()` | 默认构造 |
+| `FrameTpl(name, parentJoint, placement, type, inertia)` 等 3 个重载 | 常规构造 |
+| `operator==` / `!=` | 支持**跨标量类型**比较（模板参数 `S2,O2`） |
+| `cast<NewScalar>()` | 换标量类型 |
+
+### 4.3 `FrameType`：位标志枚举
+
+```cpp
+enum FrameType {
+  OP_FRAME    = 0x1 << 0,   // 1  用户运行时自定义的操作坐标系
+  JOINT       = 0x1 << 1,   // 2  关节坐标系（关节的镜像）
+  FIXED_JOINT = 0x1 << 2,   // 4  URDF 中被折叠掉的固定关节
+  BODY        = 0x1 << 3,   // 8  连杆的惯量/视觉/碰撞坐标系
+  SENSOR      = 0x1 << 4    // 16 传感器坐标系
+};
+```
+
+**用位标志而非顺序枚举，是为了支持按位或的组合查询**：
+
+```cpp
+model.getFrameId("tool0", FrameType(JOINT | BODY));   // 在两类里找
+```
+
+> 实测（样例人形）：70 个 Frame 的类型分布为 `BODY:40, JOINT:29, FIXED_JOINT:1`；
+> 按 `JOINT|BODY` 组合查询能正确命中。`getFrameId` 的 `type` 参数默认是**全部类型的并集**。
+
+### 4.4 Frame vs Joint：最常见的困惑
+
+| | **Joint** | **Frame** |
+|---|---|---|
+| 是不是树节点 | ✅ 运动学树的**真实节点** | ❌ 只是**挂件** |
+| 有无自由度 | 有（贡献 nq/nv） | **无** |
+| 参与递推吗 | 参与全部动力学递推 | **不参与** |
+| 位姿从哪来 | `data.oMi[i]`，递推算出 | `data.oMf[f] = oMi[parentJoint] * placement`，**事后**乘出来 |
+| 数量级 | 少（实测人形 30） | 多（实测人形 70） |
+
+**关键机制**：URDF 里的**固定关节不会进入运动学树**，而是被降级成 `FIXED_JOINT` 类型的 Frame。
+这就是"URDF 里几十个 link + 固定 joint"被压缩成"少数活动关节 + 一堆 Frame"的原因，
+也是很多人 `getJointId("某个URDF关节名")` 查不到的根源——**得用 `getFrameId`**。
+
+> Frame 层的位姿更新 API（`framesForwardKinematics` / `updateFramePlacement(s)`）
+> 及其两个易错陷阱，见 [GUIDE §4.1.2–4.1.3](../PINOCCHIO_GUIDE.md#412-frame-位姿更新的三个-api)。
 
 ---
 
 ## 5. 关节系统总览：Model/Data 分离 + CRTP + variant 双层
 
-关节是本子系统最精巧的部分。它要同时满足三个矛盾需求：**(a)** 每种关节数学不同（转/移/球/浮动…）；**(b)** 一棵树里混装不同关节，要能存进一个 `std::vector`；**(c)** 递推热循环里不能有虚函数开销。解法是**四个正交设计**叠加：
+关节是本子系统最精巧的部分。它要同时满足三个矛盾需求：
+**(a)** 每种关节数学不同（转/移/球/浮动…）；
+**(b)** 一棵树里混装不同关节，要能存进一个 `std::vector`；
+**(c)** 递推热循环里不能有虚函数开销。
+解法是**四个正交设计**叠加。
 
 ### 5.1 Model 对象 vs Data 对象（职责分离）
-每种关节都拆成两个类：
-- **`JointModelXxx`**（住在 `Model.joints`）：**静态参数 + 计算逻辑**。存关节轴、索引 `idx_q/idx_v`，提供 `calc`/`calc_aba`。**无状态**（不随 q 变）。
-- **`JointDataXxx`**（住在 `Data.joints`）：**计算缓存**。存当前 `q,v` 下算出的 `M`（关节变换）、`S`（运动子空间）、`v`（关节速度）、`c`（偏置）、ABA 量 `U/Dinv/UDinv`。
 
-`calc(jdata, q)` 就是"给定 Model 的静态参数 + 输入 q，填充 Data 的缓存"。
+每种关节都成对出现：
+
+| | `JointModelXxx` | `JointDataXxx` |
+|---|---|---|
+| 存什么 | **静态参数**：轴向、索引 `idx_q/idx_v`、id | **每次 calc 的结果**：$S$、$M_J$、$v_J$、$c_J$、$U$、$D^{-1}$ |
+| 存在哪 | `model.joints[i]` | `data.joints[i]` |
+| 可变性 | 只读（算法阶段） | 每步被 `calc` 覆写 |
+| 线程 | 多线程共享 | **每线程一份** |
+
+这与 `Model`/`Data` 的整体分离是同一思想的下沉（见 [GUIDE §3](../PINOCCHIO_GUIDE.md)）。
 
 ### 5.2 CRTP 基类（静态多态，零开销）
-`JointModelBase<Derived>`（`joint-model-base.hxx`）与 `JointDataBase<Derived>`。基类通过 `derived()` 静态转发到具体实现，没有虚函数。基类还提供一大套**段/列/块选择器**：
-- `jointConfigSelector(q)` → q 里属于本关节的那 `nq` 段；
-- `jointVelocitySelector(v)`、`jointCols(J)`、`jointBlock(M)` … 用 `SizeDepType<NV>` 在**编译期已知固定尺寸时**返回定长块（更快），动态时退化为运行时块。
 
-`PINOCCHIO_JOINT_TYPEDEF_TEMPLATE` 宏把 `traits<Joint>` 里的 `Constraint_t/Transformation_t/Motion_t/Bias_t/U_t/D_t/...` 一次性拉进作用域，避免每个关节手写十几行 typedef。
+```
+JointModelBase<JointModelRX>  ←  JointModelRX
+JointDataBase <JointDataRX>   ←  JointDataRX
+```
+
+基类提供**统一 API**（`calc`、`nq()`、`idx_q()`、段选择器…），派生类提供 `*_impl`。
+全程 `static_cast` 静态分派，**可内联、无虚表**（原理见 [GUIDE §11.3](../PINOCCHIO_GUIDE.md#113-crtp--boostfusion-访问者)）。
 
 ### 5.3 `JointCollectionDefaultTpl` → `boost::variant`（类型擦除）
-`joint-collection.hxx` 把所有具体关节类型列进一份"菜单"，末尾聚成：
+
+`joint/joint-collection.hxx` 列出库支持的**全部**关节类型，打包成：
+
 ```cpp
-typedef boost::variant<JointModelRX, JointModelRY, ..., JointModelFreeFlyer, ...,
-    boost::recursive_wrapper<JointModelComposite>,
-    boost::recursive_wrapper<JointModelMimic>> JointModelVariant;
+typedef boost::variant<JointModelRX, JointModelRY, ..., JointModelFreeFlyer, ...> JointModelVariant;
 ```
-这样 `std::vector<JointModelVariant>` 就能混装任意关节。Composite/Mimic 用 `recursive_wrapper`（它们内部又含关节，类型递归）。
+
+于是 `model.joints` 可以是 `std::vector<JointModelVariant>`——**异构关节存进同一个容器**。
+代价是访问时需要 `boost::apply_visitor` 分派（见 §11）。
 
 ### 5.4 `JointModelTpl`（`joint-generic.hxx`）：变体包装器
-`JointModelTpl` **同时**继承 `JointModelBase<JointModelTpl>`（CRTP，对外像个普通关节）和持有 `JointModelVariant`（对内是任意具体关节）。它把 `calc` 等调用通过 `apply_visitor` 转发到 variant 里真正的类型。`Model.joints` 的元素类型就是它。
 
-> 完整机制（apply_visitor + fusion 打包 + `::template` 消歧）已在 [源码解析.md](源码解析.md) 详解，这里不重复。
+它**同时**继承 `JointModelBase<JointModelTpl>` 和持有 `JointModelVariant`：
+
+```cpp
+struct JointModelTpl : JointModelBase<JointModelTpl>, JointCollection::JointModelVariant
+```
+
+作用是把"变体"重新包装成一个**满足 CRTP 接口**的类型，让上层代码
+（`model.joints[i].calc(...)`）写起来和具体关节一模一样，内部自动做 variant 分派。
+
+> 这四层叠起来的效果：**写代码像多态、跑起来像手写 switch**。
+
+### 5.5 `JointModelBase` 完整 API
+
+**① 核心计算**（转发到派生类的 `calc_impl` / 自由函数）
+
+| 方法 | 说明 |
+|---|---|
+| `calc(data, q)` | 零阶：只算位形相关量（$M_J$、$S$） |
+| `calc(data, Blank(), v)` | 一阶但**跳过位形**：`Blank` 是占位标签，表示"只更新速度" |
+| `calc(data, q, v)` | 一阶：位形 + 速度（算出 $v_J$、$c_J$） |
+| `calc_aba(data, armature, I, update_I)` | ABA 专用，见 §7 |
+
+**② 维度与索引**
+
+| 方法 | 说明 |
+|---|---|
+| `nq()` / `nv()` / `nvExtended()` | 本关节占的维度 |
+| `idx_q()` / `idx_v()` / `idx_vExtended()` | 在**全局**向量中的起始下标 |
+| `id()` | 关节在树中的 ID |
+| `setIndexes(id, q, v[, vExtended])` | 由 `Model::addJoint` 调用，把全局起点写进关节自身 |
+
+**③ 段/块选择器**（本类最实用的一组）
+
+这些函数把"从全局向量里取出属于本关节的那几维"封装成一次调用，**返回视图、零拷贝**
+（视图机制见 [GUIDE §11.5](../PINOCCHIO_GUIDE.md#115-eigen-视图类型零拷贝的实现基础)）：
+
+| 选择器 | 从什么里取 | 取出什么 |
+|---|---|---|
+| `jointConfigSelector(q)` | 全局 $q$（nq 维） | 本关节的 $q_i$ 段 |
+| `jointVelocitySelector(v)` | 全局 $v$（nv 维） | 本关节的 $v_i$ 段 |
+| `JointMappedConfigSelector(q)` | 同上 | mimic 映射后的版本 |
+| `JointMappedVelocitySelector(v)` | 同上 | 同上 |
+| `jointCols(J)` | $6\times n_v$ 矩阵 | 本关节对应的**列块**（雅可比装配用） |
+| `jointExtendedModelCols(J)` | 同上 | 扩展速度空间的列块 |
+| `jointRows(A)` | $n_v\times k$ 矩阵 | 本关节对应的**行块** |
+| `jointBlock(M)` | $n_v\times n_v$ 矩阵 | 本关节的**对角方块**（质量矩阵装配用） |
+
+每个都有 const / 非 const 两个重载。CRBA 里那句
+`data.M.block(idx_v(), idx_v(), nv(), nvSubtree[i])` 就是这类操作的手写展开。
+
+**④ 其余**
+
+| 方法 | 说明 |
+|---|---|
+| `lieGroup()` | 返回本关节对应的**李群对象**（见 §10.4 `LieGroupMap`） |
+| `hasConfigurationLimit()` / `...InTangent()` | 各分量是否有限位（浮动基四元数分量为 false） |
+| `shortname()` / `classname()` | 类型名字符串，如 `"JointModelRX"`（`disp` 与调试用） |
+| `cast<NewScalar>()` | 换标量 |
+| `operator==` / `isEqual` / `hasSameIndexes` | 比较；`hasSameIndexes` 只比索引不比参数 |
+| `disp(os)` | 打印 |
+
+### 5.6 `JointDataBase` 完整 API
+
+`JointData` 是 `calc` 的**输出容器**，接口很短但每一项都对应递推公式里的一个符号：
+
+| 访问器 | 数学符号 | 含义 |
+|---|---|---|
+| `S()` | $S_i$ | **运动子空间**（$6\times n_v$），见 §6 |
+| `M()` | $M_{J_i}(q_i)$ | 关节自由度产生的 SE(3) 变换 |
+| `v()` | $v_{J_i} = S_i\dot q_i$ | 关节自身贡献的空间速度 |
+| `c()` | $c_{J_i}$ | **速度积偏置项**（bias），$\dot S_i\dot q_i$ 类项 |
+| `U()` / `Dinv()` / `UDinv()` | $I^AS$、$(S^\top I^AS)^{-1}$ | ABA 的 Schur 补分解量 |
+| `StU()` | $S^\top U$ | 同上中间量 |
+
+其余：`shortname()`、`disp()`、`operator==`、`isEqual()`。
+
+> **对照递推公式记忆**（见 [GUIDE §4.3.2](../PINOCCHIO_GUIDE.md#432-第一趟正向传播运动学根--叶)）：
+> $\nu_i = {}^iX_{\lambda(i)}\nu_{\lambda(i)} + \underbrace{S_i\dot q_i}_{\texttt{v()}}$，
+> $a_i = {}^iX_{\lambda(i)}a_{\lambda(i)} + S_i\ddot q_i + \underbrace{\nu_i\times S_i\dot q_i}_{\text{与 }\texttt{c()}\text{ 相关}}$。
+> **`JointData` 的每个字段都在公式里有对应项**。
 
 ---
 
 ## 6. `JointMotionSubspace`（运动子空间 S）
 
-`joint-motion-subspace-{base,generic}.hxx`。这是关节**运动学的数学核心**。
-
 ### 6.1 定义
-一个关节把 `nv` 维广义速度 $\dot q_j$ 映射成刚体的 6 维空间速度（twist）：
 
-$$v_{\text{joint}} = S\,\dot q_j,\qquad S \in \mathbb{R}^{6\times n_v}$$
+$S_i \in \mathbb{R}^{6\times n_{v_i}}$ 把关节速度映射为空间速度：
 
-$S$ 就是**运动子空间矩阵**（constraint / motion subspace）。它的列张成"这个关节允许的瞬时运动方向"。对偶地，关节能传递的力/力矩是 $\tau_j = S^\top f$（`S.transpose() * force`）。
+$$\nu_{J_i} = S_i\,\dot q_i$$
 
-### 6.2 例子
-- **绕 X 轴转动 RX**：$S = e_{\text{ANGULAR}+0}=[0,0,0,1,0,0]^\top$（只有绕 X 的角速度）。所以 `data.v.angularRate() = q̇`（见 §7 revolute 的 calc）。
-- **沿 Z 移动 PZ**：$S=[0,0,1,0,0,0]^\top$。
-- **球副**：$S=\begin{bmatrix}0_{3}\\ I_3\end{bmatrix}$（3 个角速度自由度）。
-- **自由浮动基 FreeFlyer**：$S=I_6$（6 维全通）。
+对偶地，力矩由虚功原理投影得到：
 
-Pinocchio 为定轴关节写了**专用轻量 S 类型**（如 `JointMotionSubspaceRevoluteTpl`，根本不存那 6 个数，`S*v̇`/`Sᵀf` 直接取对应分量），只有通用/复合关节才用 `joint-motion-subspace-generic.hxx` 里那个**稠密 6×Dim** 的 `JointMotionSubspaceTpl`。
+$$\tau_i = S_i^\top f_i$$
 
-### 6.3 `JointMotionSubspaceTpl`（通用稠密版）实现要点
-- 存 `DenseBase S`（`6×Dim`，`Dim` 可为 `Eigen::Dynamic`，带 `MaxDim` 上界避免堆分配）。
-- `__mult__(v̇)` = `S*v̇` → `JointMotion`。
-- 内嵌 `Transpose` 代理：`transpose()*f` = `Sᵀf`（力→关节力矩）、`transpose()*F`（对力集合批量）。
-- `se3Action(M)` = $^{B}X_A$ 变换 S（把子空间搬到另一坐标系，`motionSet::se3Action`）。
-- `motionAction(v)` = $v\times S$（用于偏置/科氏项）。
-- `operator*(Inertia Y, S)` = $Y S$（`6×Dim`，CRBA/ABA 里 $I S$）。
-- `StDiagonalMatrixSOperation` = $S^\top S$（约束正规化）。
+**它是"这个关节允许什么方向的运动"的矩阵表述**，也是关节类型之间唯一的本质差异——
+上层 FK/RNEA/ABA/CRBA 的递推公式对所有关节**长得完全一样**，差异全被 $S$ 吸收。
 
-这些操作全部走 `MotionAlgebraAction`/`SE3GroupAction`/`ConstraintForceOp` 等 traits 计算返回类型，保证表达式模板不产生临时。
+### 6.2 各关节的 $S$
+
+| 关节 | $n_v$ | $S$（按 Pinocchio 的 $[v;\omega]$ 顺序） |
+|---|---|---|
+| `JointModelRZ` | 1 | $[0,0,0,\ 0,0,1]^\top$ |
+| `JointModelPX` | 1 | $[1,0,0,\ 0,0,0]^\top$ |
+| `JointModelSpherical` | 3 | $\begin{bmatrix}0_{3\times3}\\ \mathbb{1}_3\end{bmatrix}$ |
+| `JointModelTranslation` | 3 | $\begin{bmatrix}\mathbb{1}_3\\ 0_{3\times3}\end{bmatrix}$ |
+| `JointModelFreeFlyer` | 6 | $\mathbb{1}_6$ |
+| `JointModelRevoluteUnaligned` | 1 | $[0_3;\ \hat n]$，$n$ 为任意单位轴 |
+
+### 6.3 为什么要为每种关节写专门的 $S$ 类型
+
+因为**大多数 $S$ 都极度稀疏**。若统一用稠密 $6\times n_v$ 矩阵，
+$I S$、$S^\top I S$ 这些运算会白白做大量乘 0。
+
+Pinocchio 的做法是给每类关节一个**专用 $S$ 类型**（如 `JointMotionSubspaceRevoluteTpl`），
+并重载其上的运算，使乘法在编译期退化成"取一列 / 取一个元素"：
+
+| 表达式 | 稠密写法 | 定轴转动关节的实际开销 |
+|---|---|---|
+| $S^\top f$ | $6n_v$ 次乘加 | **取 $f$ 的一个分量** |
+| $I S$ | $36 n_v$ 次乘加 | **取 $I$ 的一列** |
+| $S^\top I S$ | 更多 | **取 $I$ 的一个对角元** |
+
+这套"把轴编码进类型"的手法与 [空间代数 §2](空间代数运算解析.md) 的 `CartesianAxis`/`SpatialAxis` 一脉相承，
+是 Pinocchio 单关节开销极低的微观原因。
+
+### 6.4 `JointMotionSubspaceBase` 与通用实现
+
+- `joint-motion-subspace-base.hxx`（191 行）：CRTP 基类，规定 $S$ 必须提供
+  `matrix()`、`motionAction()`、`se3Action()`、以及与 Force/Inertia 相乘的接口。
+- `joint-motion-subspace-generic.hxx`：`JointMotionSubspaceTpl` —— **稠密**的通用 $S$，
+  用于复合关节等无法静态确定稀疏模式的场合，或运行时才定维度的情形。
 
 ---
 
 ## 7. `calc` / `calc_aba`：关节的核心计算语义
 
-以 revolute（`joint-revolute.hxx`）为原型，`JointModelRevoluteTpl::calc` 有三个重载：
+### 7.1 `calc`：填充 `JointData`
+
+每种关节必须实现三个重载（签名见 §5.5）：
 
 ```cpp
-// (1) 只更新位形相关：算关节变换 M(q)
-void calc(JointData& data, q) {
-  data.joint_q[0] = qs[idx_q()];
-  SINCOS(data.joint_q[0], &sa, &ca);   // 一次同时算 sin/cos
-  data.M.setValues(sa, ca);            // M = 绕轴转 q 的 SE3（只存 sin/cos，不建 3×3）
-}
-// (2) 只更新速度：v = S·q̇
-void calc(JointData& data, Blank, v) {
-  data.joint_v[0] = vs[idx_v()];
-  data.v.angularRate() = data.joint_v[0]; // 因为 S=e_ANGULAR+axis
-}
-// (3) 位形+速度一起
-void calc(JointData& data, q, v) { calc(data,q); ...v... }
+void calc(JointDataDerived& data, const ConfigVector& qs) const;              // 零阶
+void calc(JointDataDerived& data, const Blank, const TangentVector& vs) const;// 只更新速度
+void calc(JointDataDerived& data, const ConfigVector& qs,
+                                   const TangentVector& vs) const;            // 一阶
 ```
 
-`Blank`（`boost::blank`）作为**空标签**用于区分"只传 v"的重载（否则 `calc(data,v)` 和 `calc(data,q)` 签名撞车）——这是 tag dispatch，见 [C++语法技巧.md](C++语法技巧.md)。
+**做的事**：从**全局** `q`/`v` 里取出本关节那几维（用段选择器），
+算出 $M_J(q_i)$、$S_i$、$v_{J_i}$、$c_{J_i}$，写进 `data`。
 
-`JointDataRevoluteTpl` 的字段正好对应递推所需：`joint_q,joint_v,S,M,v,c` + ABA 专用 `U,Dinv,UDinv,StU`。
+以定轴转动关节为例（`joint-revolute.hxx`）：
 
-### `calc_aba`：铰接体惯量的关节内积
 ```cpp
-void calc_aba(data, armature, I /*6×6 铰接体惯量*/, update_I) {
-  data.U = I.col(ANGULAR+axis);                        // U = I·S（S 是单位列，取一列即可）
-  data.Dinv[0] = 1 / (I(ANGULAR+axis,ANGULAR+axis) + armature[0]); // D = SᵀIS + armature，求逆
-  data.UDinv = data.U * data.Dinv[0];
-  if (update_I) I -= data.UDinv * data.U.transpose();  // 把该关节自由度"投影消去"：I ← I − U D⁻¹ Uᵀ
-}
+data.joint_q[0] = qs[idx_q()];       // 从全局 q 取出本关节的角度
+SINCOS(data.joint_q[0], &sa, &ca);   // 一次算出 sin/cos
+data.M.setValues(sa, ca);            // 填充绕轴转 q 的 SE3
 ```
-这正是 ABA（Featherstone 前向动力学）里"从铰接体惯量中消去当前关节自由度"的一步。定轴关节因为 $S$ 是单位向量，$IS$ 退化成取矩阵一列、$S^\top I S$ 退化成取一个对角元——**这就是 Pinocchio 快的原因之一：为每种关节把 S 的稀疏结构写死**。`armature` 是电机转子等效惯量（加在对角上）。
+
+`Blank` 重载的存在意义：让通用代码统一写成 `calc(jdata, q_或_Blank, v)`，
+传 `Blank` 即表示"跳过位形、只更新速度"——它是个空结构体标签（见 `src/fwd.hxx`）。
+
+### 7.2 `calc_aba`：铰接体惯量的关节内积
+
+```cpp
+void calc_aba(JointDataDerived& data, const VectorLike& armature,
+              const Matrix6Like& I, const bool update_I) const;
+```
+
+对应 ABA 第二趟递推的 Schur 补（见 [GUIDE §4.4.3](../PINOCCHIO_GUIDE.md#443-递推公式的推导)）：
+
+$$U = I^A S,\qquad D = S^\top I^A S + \text{armature},\qquad
+I^A_{\text{父}} \mathrel{-}= U D^{-1} U^\top$$
+
+**定轴转动关节的实现**（`joint-revolute.hxx`）把这套公式压到了极致：
+
+```cpp
+data.U = I.col(Inertia::ANGULAR + axis);                       // I·S → 取一列，0 次乘法
+data.Dinv[0] = 1 / (I(ANGULAR+axis, ANGULAR+axis) + armature[0]);  // SᵀIS → 取一个对角元
+data.UDinv.noalias() = data.U * data.Dinv[0];
+if (update_I)
+  I.const_cast_derived().noalias() -= data.UDinv * data.U.transpose();  // Schur 补
+```
+
+因为 $S = e_{\text{ANGULAR}+axis}$ 是**单位列向量**，$IS$ 就是取 $I$ 的第 $(\text{ANGULAR}+axis)$ 列，
+$S^\top IS$ 就是取那个对角元 —— §6.3 所说的收益在此具体兑现。
+
+**`armature` 参数**：加在 $D$ 的对角上，即电枢（转子）惯量。
+高减速比关节的 $n^2I_{\text{rotor}}$ 可能与连杆惯量同量级，忽略会让模型明显偏软。
+
+**`update_I` 参数**：是否就地把 Schur 补扣除写回 `I`。ABA 反向递推时为 `true`
+（结果要传给父关节）；只想取 $U,D$ 时传 `false`。
 
 ---
 
 ## 8. 全关节清单（NQ/NV/流形/S）
 
-| 关节 | 文件 | NQ | NV | 位形流形 | 运动子空间 S | 典型用途 |
-|------|------|----|----|----------|-------------|----------|
-| Revolute RX/RY/RZ | joint-revolute | 1 | 1 | ℝ(角度) | 单位角速度列 | 定轴铰链 |
-| RevoluteUnaligned | joint-revolute-unaligned | 1 | 1 | ℝ | 任意单位轴的角速度 | 斜轴铰链 |
-| RevoluteUnbounded RUBX/Y/Z | joint-revolute-unbounded | **2** | 1 | **SO(2)**（存 cosθ,sinθ） | 单位角速度 | 连续转动（无角度环绕问题） |
-| RevoluteUnboundedUnaligned | joint-revolute-unbounded-unaligned | 2 | 1 | SO(2) | 任意轴角速度 | 同上，斜轴 |
-| Prismatic PX/PY/PZ | joint-prismatic | 1 | 1 | ℝ | 单位线速度列 | 定轴滑动 |
-| PrismaticUnaligned | joint-prismatic-unaligned | 1 | 1 | ℝ | 任意轴线速度 | 斜轴滑动 |
-| Helical Hx/Hy/Hz | joint-helical | 1 | 1 | ℝ | 转+移耦合列（含螺距） | 螺旋副 |
-| HelicalUnaligned | joint-helical-unaligned | 1 | 1 | ℝ | 任意轴螺旋 | 斜轴螺旋 |
-| Spherical | joint-spherical | **4** | 3 | **SO(3)**（四元数） | $[0_3;I_3]$（3 角速度） | 球关节 |
-| SphericalZYX | joint-spherical-ZYX | 3 | 3 | ℝ³(欧拉角) | 依赖欧拉角的 3×3 块 | 球关节（欧拉参数化） |
-| Translation | joint-translation | 3 | 3 | ℝ³ | $[I_3;0_3]$（3 线速度） | 3D 平移台 |
-| Planar | joint-planar | **4** | 3 | **SE(2)** | x,y 线速度 + z 角速度 | 平面移动底盘 |
-| FreeFlyer | joint-free-flyer | **7** | 6 | **SE(3)**（平移+四元数） | $I_6$ | 浮动基根关节 |
-| Ellipsoid | joint-ellipsoid | 3 | 3 | 椭球约束 | 依赖位形 | 椭球接触约束 |
-| Universal | joint-universal | 2 | 2 | ℝ² | 两正交轴角速度 | 万向节 |
-| Composite | joint-composite | 动态 | 动态 | 各子关节流形笛卡尔积 | 拼接 | 多自由度组合 |
-| Mimic | joint-mimic | 动态 | 动态 | 继承被镜像关节 | 被镜像 S × 缩放 | 齿轮/耦合关节 |
+下表的 `nq`/`nv` **均由本仓库实测得出**（构造各关节对象后读 `nq()`/`nv()`）：
 
-> **NQ>NV 的关节**（RevoluteUnbounded、Spherical、Planar、FreeFlyer）就是位形住在弯流形、需要李群 exp/log 的那些——见 §10。
+| 关节类型 | `nq` | `nv` | 位形流形 | 说明 |
+|---|---|---|---|---|
+| `JointModelRX/RY/RZ` | 1 | 1 | $\mathbb{R}$ | 定轴转动。$S$ 为单位列，开销最低 |
+| `JointModelRevoluteUnaligned` | 1 | 1 | $\mathbb{R}$ | **任意轴**转动，轴向运行时给定 |
+| `JointModelRUBX/RUBY/RUBZ` | **2** | 1 | $SO(2)$ | **无界**转动，$q$ 存 $(\cos\theta,\sin\theta)$ |
+| `JointModelRevoluteUnboundedUnaligned` | **2** | 1 | $SO(2)$ | 无界 + 任意轴 |
+| `JointModelPX/PY/PZ` | 1 | 1 | $\mathbb{R}$ | 定轴移动 |
+| `JointModelPrismaticUnaligned` | 1 | 1 | $\mathbb{R}$ | 任意轴移动 |
+| `JointModelHX/HY/HZ` | 1 | 1 | $\mathbb{R}$ | **螺旋副**：转与移按导程耦合 |
+| `JointModelHelicalUnaligned` | 1 | 1 | $\mathbb{R}$ | 任意轴螺旋 |
+| `JointModelSpherical` | **4** | 3 | $SO(3)$ | 球副，$q$ 存**四元数** |
+| `JointModelSphericalZYX` | **3** | 3 | $\mathbb{R}^3$ | 球副，$q$ 存 **Z-Y-X 欧拉角**（有万向锁！） |
+| `JointModelTranslation` | 3 | 3 | $\mathbb{R}^3$ | 三维平移 |
+| `JointModelPlanar` | **4** | 3 | $SE(2)$ | 平面副，$q$ 存 $(x,y,\cos\theta,\sin\theta)$ |
+| `JointModelFreeFlyer` | **7** | 6 | $SE(3)$ | **浮动基**，$q$ 存 $(位置_3,四元数_4)$ |
+| `JointModelUniversal` | 2 | 2 | $\mathbb{R}^2$ | 万向节（两正交轴） |
+| `JointModelEllipsoid` | — | — | — | 椭球约束关节 |
+| `JointModelComposite` | 累加 | 累加 | 笛卡尔积 | 见 §9.1 |
+| `JointModelMimic` | 0 | 0 | — | 见 §9.2 |
+
+### 8.1 三组 $n_q > n_v$ 的关节及其原因
+
+这是 $n_q \neq n_v$ 的**全部来源**，值得逐一看清：
+
+| 关节 | $n_q$ vs $n_v$ | 多出来的那一维用来干嘛 |
+|---|---|---|
+| `RUB*`（无界转动） | 2 vs 1 | 存 $(\cos\theta,\sin\theta)$ 而非 $\theta$ —— 这样转过 $\pm\pi$ 不会跳变，可无限旋转（轮子、传送带） |
+| `Spherical` | 4 vs 3 | 四元数的**归一化约束**吃掉一维 |
+| `Planar` | 4 vs 3 | 同上，姿态部分用 $(\cos,\sin)$ |
+| `FreeFlyer` | 7 vs 6 | 同上，四元数 4 维对应 3 维角速度 |
+
+> **反例**：`SphericalZYX` 是 $n_q = n_v = 3$，因为它用**欧拉角**参数化——代价是存在**万向锁**
+> （$\text{pitch}=\pm90°$ 时丢一个自由度）。`Spherical` 用四元数则无此问题。
+> 需要大范围姿态运动时优先选 `Spherical`。
+
+> 这也解释了为何 `q += v*dt` 是错的、必须用 `integrate()`：对上述四类关节，
+> $q$ 与 $v$ 维度都不同，逐元素相加根本无从谈起（见 §10）。
 
 ---
 
 ## 9. 复合关节：Composite / Mimic / Unaligned / Unbounded
 
 ### 9.1 Composite（`joint-composite.hxx`）
-把若干关节**串联**成一个逻辑关节，NQ/NV 是各子关节之和（`Eigen::Dynamic`）。它的 `calc` 依次算各子关节的变换并复合 $M = M_1 M_2 \cdots$，S 由各子空间经 SE3 变换拼接。用于把"肩 3 转 + 肘…"打包，或造非标准关节。
+
+把**多个关节串联**成一个逻辑关节：$n_q$、$n_v$ 为各子关节之和，
+$S$ 为各子关节 $S$ 经相对变换后拼成的 $6\times n_v$ 稠密矩阵，位形流形是各子流形的**笛卡尔积**。
+
+**用途**：URDF 里用几个单自由度关节串出的复合机构（如 RPY 三连转），
+合成一个关节后减少树节点数；也用于自定义关节原型。
+
+**代价**：$S$ 变稠密，失去 §6.3 的稀疏红利，
+故仅在确有需要时使用。其 `calc` 内部对子关节逐个调用并做变换复合。
 
 ### 9.2 Mimic（`joint-mimic.hxx`）
-**镜像关节**：让 q 线性绑定到另一个（被镜像）关节：
 
-$$q_{\text{mimic}} = s\cdot q_{\text{mimicked}} + o$$
+把一个关节的位形**线性绑定**到另一个关节：
 
-（`s`=scaling、`o`=offset）。核心是 `ScaledJointMotionSubspaceTpl`：把被镜像关节的约束 $S$ 整体乘以缩放因子 $s$——`S_mimic = s·S_mimicked`，`Sᵀf = s·(S_mimickedᵀf)`。这样两个关节共享同一个自由度（齿轮组、平行四连杆）。`Model` 里用 `mimicking_joints`/`mimicked_joints`/`mimic_joint_supports` 记账，这也是 `nvExtended`（雅可比列数 ≠ nv）存在的原因。
+$$q_{\text{mimic}} = \text{scaling}\cdot q_{\text{mimicked}} + \text{offset}$$
+
+**自身 $n_q = n_v = 0$**——它不贡献独立自由度，这正是 mimic 模型 `nv` 变小的原因；
+但递推时仍需按展开维度计算，故有了 `nvExtended`（见 §2.2）。
+
+Model 里用 `mimicking_joints` / `mimicked_joints` 记录绑定关系
+（实测 Baxter：`mimicking=[10,19]`、`mimicked=[9,18]`）。
+
+数学上等价于引入传动矩阵 $G$：$\tau_{\text{mimic}} = G\tau_{\text{full}}$、
+$M_{\text{mimic}} = GM_{\text{full}}G^\top$（见 `examples/mimic_dynamics.py`，
+该例还用 `model == model2` 验证手工 `transformJointIntoMimic` 与 URDF 解析结果一致）。
+
+**典型场景**：夹爪两指齿轮耦合、并联传动、差速驱动。
 
 ### 9.3 Unaligned 系列
-定轴版（RX/PZ…）把轴写死进模板参数 `axis`（0/1/2），S 的分量在编译期已知、最快。**Unaligned** 版把轴变成运行时 `Vector3 axis` 成员，`calc` 用 Rodrigues 现算旋转——灵活但略慢。
+
+`RevoluteUnaligned` / `PrismaticUnaligned` / `HelicalUnaligned`：
+轴向不是 X/Y/Z 而是**运行时给定的任意单位向量** $n$。
+
+**代价**：定轴版本的 $S$ 是编译期已知的单位列（$IS$ = 取一列）；
+Unaligned 版本的 $S$ 依赖运行时的 $n$，只能做真正的矩阵向量乘。
+**所以 URDF 里能对齐坐标轴时，让轴与 X/Y/Z 对齐是有性能意义的**。
 
 ### 9.4 Unbounded 系列
-普通 revolute 用**角度值**存 q，转过 ±π 会有环绕/插值问题。Unbounded 改用 **(cosθ, sinθ)** 两个数存 q（NQ=2），位形流形是 **SO(2)**，integrate/difference 走李群运算——适合需要连续多圈转动的轮子/连续关节。
+
+`RUBX/RUBY/RUBZ` / `RevoluteUnboundedUnaligned`：位形存 $(\cos\theta,\sin\theta)$（$n_q=2$），
+流形是 $SO(2)$ 而非 $\mathbb{R}$。
+
+**解决什么问题**：普通转动关节的 $\theta$ 是实数，转到 $\pm\pi$ 会遇到限位或数值跳变；
+无界版本在圆周上积分，可无限旋转且无跳变。**轮子、转台、连续旋转关节应当用它**。
+
+### 9.5 Ellipsoid（`joint-ellipsoid.hxx`）
+
+椭球约束关节，用于把运动限制在椭球面上的特殊机构建模（较少用）。
 
 ---
 
 ## 10. 李群系统：位形流形的加减法
 
-`liegroup/`。这是解决"**位形不能直接加减**"的子系统。
-
 ### 10.1 为什么需要它
-广义速度积分 $q \leftarrow q + v\,\Delta t$ 只对**欧氏**自由度成立。对姿态（四元数）直接相加会**跳出流形**（不再是单位四元数）。正确做法是在**李群**上：
 
-$$q \oplus v \;=\; q \cdot \exp(v)\quad(\text{integrate}),\qquad q_1 \ominus q_0 \;=\; \log(q_0^{-1} q_1)\quad(\text{difference})$$
+§8.1 说明了 $n_q\neq n_v$ 的四类来源。
+一旦维度都对不上，`q + v*dt` 就无从谈起；即便维度相同（如 `SphericalZYX`），
+逐元素相加也会离开流形（欧拉角相加不等于旋转复合）。
 
-于是 `integrate`/`difference` 成了所有涉及位形的算法（数值积分、IK、插值、随机采样、有限差分求导）的地基。
+**李群系统的职责就是提供流形上正确的"加减法"**：
 
-### 10.2 `LieGroupBase<Derived>`（`liegroup-base.hxx`）API
-CRTP 基类，统一接口（节选）：
+$$q \oplus v \;\equiv\; \texttt{integrate}(q, v), \qquad
+q_1 \ominus q_0 \;\equiv\; \texttt{difference}(q_0, q_1)$$
+
+> **实测**（样例人形，34 DoF）：
+> `difference(q0, integrate(q0,v)) − v` 残差 $4.6\times10^{-16}$；
+> `integrate(q0, difference(q0,q1))` 与 $q_1$ 相差 $6.3\times10^{-16}$ —— 二者严格互逆。
+
+### 10.2 `LieGroupBase<Derived>` 完整 API（`liegroup-base.hxx`）
+
+**① 基本运算**
 
 | 方法 | 数学 | 说明 |
-|------|------|------|
-| `integrate(q,v,qout)` | $q\oplus v$ | 沿切向量走一步 |
-| `difference(q0,q1,d)` | $q_1\ominus q_0$ | 两位形之差（切向量） |
-| `dIntegrate_dq/dv` | $\partial(q\oplus v)/\partial q,\partial v$ | 积分的雅可比（= Jexp 类） |
-| `dDifference<ARG0/ARG1>` | $\partial(q_1\ominus q_0)/\partial q_{0/1}$ | 差分的雅可比（= Jlog 类） |
-| `interpolate(q0,q1,u)` | $q_0\oplus(u\,(q_1\ominus q_0))$ | 测地线插值 |
-| `dIntegrateTransport` | 平行移动 | 把切空间量沿积分搬运 |
-| `randomConfiguration` / `normalize` / `isNormalized` | — | 流形上采样/投影/校验 |
-| `squaredDistance` / `distance` | $\|q_1\ominus q_0\|^2$ | 测地距离 |
-| `nq()` `nv()` `neutral()` `name()` | — | 维度、单位元、名字 |
+|---|---|---|
+| `integrate(q, v, qout)` | $q\oplus v$ | 流形上"加法"，内部走各群的 exp |
+| `difference(q0, q1, vout)` | $q_1\ominus q_0$ | 流形上"减法"，内部走 log |
+| `interpolate(q0, q1, u, qout)` | 测地线插值 | $u{=}0\to q_0$、$u{=}1\to q_1$（实测端点残差 $0$ / $6.3\times10^{-16}$） |
+| `distance(q0, q1)` / `squaredDistance` | $\lVert q_1\ominus q_0\rVert$ | 实测与 `‖difference‖` 一致（$1.8\times10^{-15}$） |
+| `random(qout)` / `randomConfiguration(lb, ub, qout)` | — | 流形上均匀采样 / 限位内采样 |
+| `normalize(qout)` | — | 投影回流形（四元数除以模长） |
+| `isNormalized(q, prec)` | — | 是否在流形上 |
+| `isSameConfiguration(q0, q1, prec)` | — | 两位形是否等价（注意四元数双覆盖） |
+
+> ⚠️ **Python 绑定的 `normalize` 不就地修改**：C++ 的 `normalize(qout)` 写入参数，
+> 而 `pin.normalize(model, q)` **返回**归一化后的新数组、原 `q` 不变。实测：
+> 修改四元数使 $\lvert q\rvert=1.05$ 后调用，原数组仍为 1.05，返回值才是 1.0。
+> 写成 `q = pin.normalize(model, q)` 才有效。
+
+**② 一阶导数（轨迹优化必需）**
+
+| 方法 | 含义 |
+|---|---|
+| `dIntegrate(q, v, J, arg)` | $\partial(q\oplus v)/\partial q$ 或 $/\partial v$，由 `arg` 选（`ARG0`/`ARG1`） |
+| `dIntegrate_dq` / `dIntegrate_dv` | 上面两个的显式命名版本 |
+| `dDifference(q0, q1, J, arg)` | $\partial(q_1\ominus q_0)/\partial q_0$ 或 $/\partial q_1$ |
+| `integrateCoeffWiseJacobian(q, J)` | $\partial q/\partial(\text{参数})$ 的逐系数版（$n_q\times n_v$） |
+
+> 实测 `dIntegrate` 返回 $34\times34$（即 $n_v\times n_v$）。
+> 这些是 DDP/iLQR 在浮动基上做状态扰动时的必需件（见 [GUIDE §4.8.3](../PINOCCHIO_GUIDE.md#483-与-ddp-的状态空间矩阵的关系)）。
+
+**③ 雅可比传输（transport）**
+
+| 方法 | 用途 |
+|---|---|
+| `dIntegrateTransport(q, v, Jin, Jout, arg)` | 把一个定义在 $q$ 处切空间的雅可比，**搬运**到 $q\oplus v$ 处的切空间 |
+| `dIntegrateTransport_dq` / `_dv` | 同上的具名版本 |
+
+**为什么需要"传输"**：流形上不同点的切空间是**不同的向量空间**，
+在 $q$ 处算出的梯度不能直接用在 $q\oplus v$ 处，必须先做平行移动。
+这是李群优化与欧氏优化最容易被忽略的差别。
+
+**④ 切空间映射**
+
+| 方法 | 含义 |
+|---|---|
+| `tangentMap(q, TM)` | 切空间到位形空间增量的映射（$n_q\times n_v$） |
+| `tangentMapProduct` / `tangentMapTransposeProduct` | 免构造矩阵的乘积形式 |
+
+**⑤ 元信息**：`nq()`、`nv()`、`name()`、`neutral()`、`operator==`。
 
 ### 10.3 三种基础群 + 笛卡尔积
 
-**① `VectorSpaceOperationTpl<Dim>`（`vector-space.hxx`）—— ℝⁿ**
-平凡群：`integrate` = $q+v$，`difference` = $q_1-q_0$，雅可比 = $I$。绝大多数关节（转/移/欧拉球…）默认用它。
+| 文件 | 群 | 用于哪些关节 |
+|---|---|---|
+| `vector-space.hxx` | $\mathbb{R}^n$ | 转动/移动/欧拉角球副等**普通**关节（默认流形） |
+| `special-orthogonal.hxx` | $SO(2)$ / $SO(3)$ | 无界转动 / 球副 |
+| `special-euclidean.hxx` | $SE(2)$ / $SE(3)$ | 平面副 / 浮动基 |
+| `cartesian-product.hxx` | $G_1\times G_2\times\cdots$ | **整机位形空间** |
 
-**② `SpecialOrthogonalOperationTpl<N>`（`special-orthogonal.hxx`）—— SO(2)/SO(3)**
-SO(3)：nq=4（四元数）、nv=3。核心直接调用 `spatial/` 的四元数 exp/log：
-```cpp
-integrate: quat_out = quat * exp3(v); firstOrderNormalize(quat_out);   // q·exp(v)
-difference: d = log3(quat0.conjugate() * quat1);                       // log(q0⁻¹q1)
-dDifference<ARG1>: Jlog3(R);   dDifference<ARG0>: -Jlog3(R)·Rᵀ
-```
-`neutral` = (0,0,0,1)。SO(2) 版用 (cosθ,sinθ) 存位形。这里的 `Jlog3`/`exp3` 正是 [空间代数解析 §7](空间代数运算解析.md) 里详解的那些。
+**整机流形是各关节流形的笛卡尔积**。例如人形：
 
-**③ `SpecialEuclideanOperationTpl<N>`（`special-euclidean.hxx`）—— SE(2)/SE(3)**
-SE(3)：nq=7（平移 3 + 四元数 4）、nv=6、`neutral`=(0,0,0,0,0,0,1)。
-```cpp
-difference: d = log6( SE3(quat0⁻¹·quat1, quat0⁻¹·(t1−t0)) ).toVector();  // 完整 SE3 log
-integrate: 用 quaternion::exp6(v) 得到增量，再复合平移与姿态
-dDifference<ARG1>: Jlog6(M);   dDifference<ARG0>: 复合 -R^T/skew 块后左乘 Jlog6
-```
-`R3crossSO3_t` 类型注释点明：SE(3) 位形空间可视为 ℝ³×SO(3)，但**integrate/difference 用的是真正的 SE(3) 测地线**（`exp6`/`log6`，平移与旋转耦合），不是分开的 ℝ³ 与 SO(3)。这与 [空间代数解析 §7.7](空间代数运算解析.md) 的 log6/Jlog6 完全对应。
+$$\mathcal{Q} = \underbrace{SE(3)}_{\text{浮动基}} \times \underbrace{\mathbb{R}\times\cdots\times\mathbb{R}}_{\text{各转动关节}}$$
 
-**④ 笛卡尔积（`cartesian-product*.hxx`）**
-整机位形空间 = 各关节流形的笛卡尔积 $\prod_i \mathcal{G}_i$。`integrate` 逐段调用各子群的 `integrate`。`liegroup-generic.hxx`/`liegroup-collection.hxx` 把这些群也做成 variant，`cartesian-product-variant` 支持运行时拼装。
+`cartesian-product-variant.hxx` 提供运行时可变长度的版本（关节数在编译期未知时用）。
 
 ### 10.4 `LieGroupMap`（`liegroup-map.hxx`）—— 关节→流形映射表（关键枢纽）
-一张编译期查找表，决定"每种关节的 q 该用哪个群积分"：
 
-| 关节 | 映射到的流形 |
-|------|-------------|
-| 默认（转/移/欧拉球/万向…） | `VectorSpaceOperationTpl<NQ>`（欧氏） |
-| `JointModelSpherical` | `SpecialOrthogonalOperationTpl<3>`（SO(3)） |
-| `JointModelFreeFlyer` | `SpecialEuclideanOperationTpl<3>`（SE(3)） |
-| `JointModelPlanar` | `SpecialEuclideanOperationTpl<2>`（SE(2)） |
-| `JointModelRevoluteUnbounded{,Unaligned}` | `SpecialOrthogonalOperationTpl<2>`（SO(2)） |
-| Composite/Mimic/generic | 笛卡尔积 variant |
+一个**编译期查表**结构，回答"某关节类型对应哪个流形"：
 
-`liegroup-algo.hxx` 就是**沿整棵树对每个关节查这张表、调对应群的 integrate/difference**，从而实现整机版的 `pinocchio::integrate(model, q, v)`。
+```cpp
+template<typename JointModel> struct operation { typedef ... type; };
+// JointModelRX          → VectorSpaceOperation<1>
+// JointModelSpherical   → SpecialOrthogonalOperation<3>
+// JointModelFreeFlyer   → SpecialEuclideanOperation<3>
+// JointModelRUBX        → SpecialOrthogonalOperation<2>
+```
+
+`JointModelBase::lieGroup()` 就是查这张表返回对应的群对象。
+
+> **它是整个设计的枢纽**：新增一种关节时，只要在这张表里登记它的流形，
+> `integrate`/`difference`/`randomConfiguration` 等**整机级**操作就自动支持了新关节，
+> 无需改动任何算法代码。
+
+### 10.5 其余李群文件
+
+| 文件 | 作用 |
+|---|---|
+| `liegroup-collection.hxx` | 李群"菜单" → `LieGroupGenericTpl` variant |
+| `liegroup-generic.hxx` | 变体包装器（与 `JointModelTpl` 同构的设计） |
+| `liegroup-variant-visitors.hxx` | 对李群 variant 的访问者入口 |
+| `liegroup-algo.hxx` | **沿整棵树**逐关节应用李群操作 —— `pin.integrate(model,q,v)` 的实现落点 |
+| `liegroup-joint.hxx` | 关节与其李群的桥接 |
+| `fwd.hxx` | 前置声明 |
+
+> 调用链：`pin::integrate(model,q,v)` → `liegroup-algo.hxx` 的树遍历
+> → 每个关节 `jmodel.lieGroup()` 查 `LieGroupMap`
+> → 调用该群的 `integrate` → 写回 `q` 的对应段。
 
 ---
 
 ## 11. 访问者系统：把 variant 变成可调用的算法
 
-`visitor/`。`Model.joints[i]` 是 `JointModelVariant`（类型被擦除），要在它上面调 `calc` 就得**恢复真实类型**——靠 Boost.Variant 的 `apply_visitor`。
+`model.joints[i]` 是 `boost::variant`，运行时可能是任意一种关节。
+访问者负责**在不用虚函数的前提下**跳到正确的具体实现。
 
-- **`fusion.hxx`**：`bf::append(t, ts...)` 把一组参数 `push_front` 进 Boost.Fusion 序列。访问者需要把"除关节外的其它参数（data、q、v…）"打包成一个序列，随关节类型一起送进 visitor。
-- **`joint-unary-visitor.hxx`**：一元访问者。对**单个**关节 variant 分派，如 `calc`、`nv`、`cast`。用户写一个带模板 `operator()(JointModelDerived&, args...)` 的 struct，框架用 `apply_visitor` 在运行时选中真实类型、编译期为每种类型实例化一份。
-- **`joint-binary-visitor.hxx`**：二元访问者。对**两个**关节 variant 同时分派（笛卡尔积展开 N×N 种组合），用于需要两个关节类型的操作。
-- **`joint-basic-visitors.hxx`**：把上面封装成好用的自由函数：`calc_zero_order(model,data,q)`、`calc_first_order(...)`、`calc_aba(...)`、`nv(jmodel)`、`cast(...)` 等——算法层直接调这些。
+### 11.1 `JointUnaryVisitorBase`（`visitor/joint-unary-visitor.hxx`，328 行）
 
-> 三件套（variant + apply_visitor + fusion 打包）的最小可运行 demo 与 `::template` 消歧细节见 [源码解析.md](源码解析.md)，此处不重复。
+对**单个**关节 variant 分派。用法三要素（CRTP）：
+
+```cpp
+struct MyStep : public fusion::JointUnaryVisitorBase<MyStep>   // ① CRTP 自引用
+{
+  typedef boost::fusion::vector<const Model&, Data&, ...> ArgsType;  // ② 透传参数包
+
+  template<typename JointModel>                                       // ③ 对每种关节各实例化一份
+  static void algo(const JointModelBase<JointModel>& jmodel,
+                   JointDataBase<typename JointModel::JointDataDerived>& jdata,
+                   const Model& model, Data& data, ...)
+  { /* 这里 jmodel 已是具体类型，静态分派、可内联 */ }
+};
+// 调用
+MyStep::run(model.joints[i], data.joints[i], MyStep::ArgsType(model, data, ...));
+```
+
+**分派链路**：`run` → `boost::apply_visitor` → 编译期已生成的分支表 → `algo<JointModelRX>` →
+`jmodel.calc(...)` → `joint-revolute.hxx` 的 `calc`。
+运行时只是"选分支"，**没有虚表查找**。
+
+> 有多个重载：带/不带 `JointData`、带/不带返回值。
+> 手写一个访问者并与官方 `forwardKinematics` 比对的可运行例子见
+> [`doc/architecture-tutorial/03-visitor/`](../doc/architecture-tutorial/03-visitor/main.cpp)。
+
+### 11.2 `JointBinaryVisitorBase`（`joint-binary-visitor.hxx`，234 行）
+
+对**两个**关节 variant 同时分派（需要 $N^2$ 个分支组合）。
+用于涉及关节对的运算，如某些约束/耦合处理。
+
+### 11.3 `visitor/fusion.hxx`
+
+只做一件事：`bf::append` —— 把可变参数包压进 Boost.Fusion 序列，
+使 `ArgsType` 能承载任意数量、任意类型的透传参数。
+
+> **读算法的固定套路**：打开任意 `algorithm/*.hxx`，数一数里面有几个
+> `struct ...Step : JointUnaryVisitorBase<...>`，就知道该算法有几趟递推 ——
+> RNEA 两个（对应 [GUIDE §4.3](../PINOCCHIO_GUIDE.md#43-逆向动力学-rnea) 的正/反两趟）、
+> ABA 三个、FK 一个。**公式与 Step 一一对应**。
 
 ---
 
 ## 12. 其余文件：pool / sample-models / force-set
 
-- **`pool/model.hxx`（`ModelPoolTpl`）**：并行计算池。持有 `vector<Model> m_models` 与 `vector<Data> m_datas`（每线程一份拷贝），配合 OpenMP（`omp_get_max_threads`）跑批量前向/碰撞。`update(data)` 广播一份 data 到全池。`pool/geometry.hxx` 是带碰撞几何的版本。
-- **`sample-models.hxx`**：`buildModels::humanoid/manipulator(...)` 程序化生成测试机器人（单元测试、benchmark、教程用）。
-- **`force-set.hxx`**：力集合/运动集合（`6×N` 矩阵）的批量列变换辅助，配合 `JointMotionSubspace` 的批量 `SᵀF`。
+### 12.1 `pool/model.hxx`、`pool/geometry.hxx`：并行计算的对象池
+
+**要解决的问题**：`Model` 只读、可多线程共享，但 `Data` 是可写的，
+每个线程必须有**自己的一份**。手工管理容易出错。
+
+`ModelPoolTpl` 就是这个管理器：
+
+| 方法 | 说明 |
+|---|---|
+| `ModelPoolTpl(model, pool_size)` | 构造：内部复制 `pool_size` 份 `Data` |
+| `size()` / `resize(n)` | 池容量查询 / 调整（线程数变化时） |
+| `getModel(i)` / `getModels()` | 取第 $i$ 个（或全部）`Model` |
+| `getData(i)` / `getDatas()` | 取第 $i$ 个（或全部）`Data` —— **每线程用自己的索引** |
+| `update(data)` | 用给定 `Data` 刷新池中所有副本 |
+
+`GeometryPoolTpl` 是它对几何模型的对应物（并行碰撞检测用）。
+
+**上层用法**见 [`examples/run-algo-in-parallel.py`](../examples/run-algo-in-parallel.py)：
+`pin.ModelPool(model)` + `rneaInParallel(num_threads, pool, q, v, a, res)`，
+对 $(n_q\times B)$ 的一批配置并行跑 RNEA。
+
+### 12.2 `sample-models.hxx`：内置测试模型
+
+| 函数 | 产出 |
+|---|---|
+| `buildModels::manipulator(model)` | 6-DoF 串联机械臂（固定基） |
+| `buildModels::humanoid(model)` | 人形（浮动基） |
+| `buildModels::humanoidRandom(model)` | 人形，惯量参数随机 |
+| `buildModels::manipulatorGeometries(...)` 等 | 配套几何模型 |
+
+**价值**：不依赖任何 URDF 文件即可跑通全部算法 —— 单元测试、基准测试、
+以及本文档所有数值验证都用它（实测样例人形：`nq=35, nv=34, njoints=30, nframes=70`）。
+
+### 12.3 `force-set.hxx`
+
+对**一批** Force / Motion（存成 $6\times N$ 矩阵，每列一个）做批量变换的辅助。
+与 [空间代数 §act-on-set](空间代数运算解析.md) 是同一套思路：
+把公共部分（取 $R$、算 $\hat t$）提到循环外，让 Eigen 对整块矩阵向量化，
+远快于逐列调用。雅可比的参考系转换即依赖它。
 
 ---
 

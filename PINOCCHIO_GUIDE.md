@@ -3878,43 +3878,203 @@ bindings/python/module.cpp                    # 总入口，依次调用所有 e
 
 ## 14. 源码阅读推荐顺序
 
-按"地基→建模→算法→扩展"的依赖顺序读，避免一上来陷进模板细节。
+> ⚠️ **先说路径**：本仓库（v3.6 开发版）的头文件已重构，网上教程里的
+> `pinocchio/spatial/se3.hpp`、`pinocchio/multibody/model.hpp` **都不存在了**。现在是：
+>
+> | 你要找 | 声明（对外） | 实现（真正的代码） |
+> |---|---|---|
+> | 空间代数 | `include/pinocchio/spatial.hpp`（伞形） | `include/pinocchio/src/spatial/*.hxx` |
+> | 建模层 | `include/pinocchio/multibody.hpp` | `include/pinocchio/src/multibody/*.hxx` |
+> | 算法 | `include/pinocchio/algorithm/xxx.hpp` | `include/pinocchio/src/algorithm/xxx.hxx` |
+>
+> **实现体永远在带 `src/` 的那条路径下**。只在 `algorithm/`、`spatial/` 里翻找不到实现体，
+> 是最常见的迷路方式（机制见 [§11.1](#111-三层文件布局-hpp--hxx--cpp)）。
 
-```
-第 0 步：先读机制，别读代码
-  → 本指南 §11（三大机制）+ §12（一条追踪链路）
-  → 目的：建立"公式↔Step、.hpp↔.hxx、Tpl↔别名"的心智模型
+### 14.1 总体路线
 
-第 1 步：空间代数地基（spatial/）
-  → se3.hpp → motion.hpp → force.hpp → inertia.hpp → explog.hpp
-  → 对照本指南 §2；这是后面一切算法的"数据类型词汇表"
+按"地基 → 建模 → 算法 → 扩展"的**依赖顺序**读。每一步都给出**入口文件**、
+**配套文档**和**自检问题**——能答上自检问题再进入下一步，否则回头补。
 
-第 2 步：建模层（multibody/）
-  → model.hpp(ModelTpl) + src/multibody/data.hxx(DataTpl)：先看有哪些字段（对照 §3）
-  → joint/joint-revolute.hxx：读懂一种最简单关节的 calc / calc_aba / S
-  → visitor.hpp：读懂 JointUnaryVisitorBase::run 如何分派（§11.3）
+---
 
-第 3 步：运动学算法（最短、最适合练手）
-  → src/algorithm/kinematics.hxx：一趟遍历，验证 §12 的追踪链
-  → jacobian.hxx：几何 Jacobian 如何按列填充
+#### 第 0 步：先读机制，别读代码
 
-第 4 步：动力学三大件（对照 §4 的公式读 Step）
-  → rnea.hxx（2 趟）→ crba.hxx（复合惯量、上三角）→ aba.hxx（3 趟 + 关节化体惯量）
+| | |
+|---|---|
+| **读什么** | 本指南 [§11 三大机制](#11-源码架构三大机制) + [§12 一条追踪链路](#12-实战追踪一个算法从-api-到实现) |
+| **动手** | `cd doc/architecture-tutorial && make run`（三个可运行实验） |
+| **目的** | 建立"公式↔Step、`.hpp`↔`.hxx`、`Tpl`↔别名"的心智模型 |
 
-第 5 步：人形核心
-  → centroidal.hxx（质心动量矩阵 Ag）
-  → constrained-dynamics.hxx + contact-cholesky.hxx（KKT / Delassus，最硬）
+**自检**：
+- 为什么每个 `.hpp` 末尾都要 `#include` 对应的 `.hxx`？删掉会怎样？
+- `pinocchio::Model` 和 `ModelTpl<double,0>` 是什么关系？
+- 一个算法有几趟递推，怎么**一眼看出来**？
 
-第 6 步：解析梯度（读完对应正算法再读其导数）
-  → rnea-derivatives.hxx → aba-derivatives.hxx → kinematics-derivatives.hxx
+> 跳过这步直接读代码，会在第一个 `PINOCCHIO_EIGEN_CONST_CAST` 或
+> `fusion::JointUnaryVisitorBase<...>` 前卡住。
 
-第 7 步：按需扩展
-  → parsers/urdf（建模来源）、collision/（碰撞）、autodiff/ 与 codegen/（高级标量）
-  → 想加新关节类型：doc/e-development/Implement_a_new_joint.md 是官方教程
-```
+---
 
-**贯穿始终的两个好习惯**：
+#### 第 1 步：空间代数地基（`src/spatial/`）
 
-1. **对照单测读实现**——`unittest/<algo>.cpp` 给出该算法的期望输入输出，是最好的"实现真值"。
-2. **对照本指南第 4 章读 `.hxx`**——每个 `impl::*Step` 都能在第 4 章找到对应公式，公式讲"为什么"，
-   代码讲"怎么写"，两边对读效率最高。
+| | |
+|---|---|
+| **读什么** | `se3-tpl.hxx` → `motion-dense.hxx` → `force-dense.hxx` → `inertia.hxx` → `explog.hxx` |
+| **配套** | [docs/空间代数运算解析.md](docs/空间代数运算解析.md)（每个运算的公式↔代码↔几何含义） + 本指南 [§2](#2-核心数学基础) |
+| **份量** | 5 个文件，是后面一切算法的"数据类型词汇表" |
+
+**读法**：先读 `*-base.hxx`（接口清单），再读 `*-tpl.hxx` / `*-dense.hxx`（真正实现）。
+`se3-base.hxx` 里 28 个函数有 26 个是纯转发，**别在那里浪费时间**。
+
+**自检**：
+- `v.linear()` 是质心速度吗？（答案见 [§2.2.1](#221-空间速度twist)）
+- 速度用伴随、力用余伴随——为什么不能反过来？
+- $\bar I_C$ 和动力学参数向量里的 $\bar I_O$ 差在哪？
+
+---
+
+#### 第 2 步：建模层（`src/multibody/`）
+
+| | |
+|---|---|
+| **读什么** | `model.hxx`（字段+`addJoint`）→ `data.hxx`（字段命名规律）→ `joint/joint-revolute.hxx` → `visitor/joint-unary-visitor.hxx` |
+| **配套** | [docs/multibody子系统解析.md](docs/multibody子系统解析.md)（**逐文件逐方法**） |
+
+**关键取舍**：`data.hxx` 有 ~150 个字段，**不要逐个读**。先掌握命名规律
+（前缀 `o`=世界系、后缀 `_fromRow`=按自由度重排……），用到再查。
+
+`joint-revolute.hxx` 是**最值得精读的单个关节文件**：它的 `calc_aba` 把
+$U = I^AS$、$D = S^\top I^AS$ 压成"取一列 / 取一个对角元"，是"把轴编码进类型"
+这一设计收益的最佳样本。
+
+**自检**：
+- `nq`、`nv`、`nvExtended` 三者何时不等？
+- URDF 里的固定关节去哪了？为什么 `getJointId` 查不到它？
+- `supports` 和 `subtrees` 分别服务于哪类算法？
+
+---
+
+#### 第 3 步：运动学算法（最短，最适合练手）
+
+| | |
+|---|---|
+| **读什么** | `src/algorithm/kinematics.hxx` → `jacobian.hxx` → `frames.hxx` |
+| **配套** | 本指南 [§4.1](#41-正向运动学-fk)（含 Frame 层的两个陷阱） |
+
+`kinematics.hxx` 只有一趟递推、三行核心逻辑，是验证第 0 步心智模型的最佳靶子。
+读完可做 [`doc/architecture-tutorial/03-visitor/`](doc/architecture-tutorial/03-visitor/main.cpp)
+里的练习：**手写一个 FK 访问者并与官方实现逐关节比对**。
+
+**自检**：
+- `framesForwardKinematics` 和 `updateFramePlacement` 差在哪？各自的前置条件？
+- `LOCAL` / `WORLD` / `LOCAL_WORLD_ALIGNED` 取哪个才是"末端那一点的真实速度"？
+
+---
+
+#### 第 4 步：动力学三大件
+
+| 顺序 | 文件 | 趟数 | 对应公式 |
+|---|---|---|---|
+| ① | `rnea.hxx` | 2（正向+反向） | [§4.3](#43-逆向动力学-rnea) |
+| ② | `crba.hxx` | 1 反向 | [§4.5](#45-质量矩阵-crba) |
+| ③ | `aba.hxx` | 3 | [§4.4](#44-正向动力学-aba) |
+
+**读法**：**打开 `.hxx` 先数 `struct ...Step` 的个数**，与本指南第 4 章的"趟数"对上，
+再逐 Step 对照公式读 `algo()` 体。
+
+**建议顺序理由**：RNEA 最直观（无矩阵求逆）；CRBA 引入复合刚体惯量；
+ABA 的铰接体惯量最难，但读完前两个后对比着看会容易得多——
+**`crb`=子关节锁死（对应 $M$），`aba`=子关节自由（对应 $M^{-1}$）**。
+
+**自检**：
+- 重力是怎么进入 RNEA 的？（提示：`a_gf[0]`）
+- CRBA 为什么只填上三角？`M` 的稀疏模式由什么决定？
+- ABA 里的 Schur 补在物理上扣除了什么？
+
+---
+
+#### 第 5 步：人形核心
+
+| | |
+|---|---|
+| **读什么** | `centroidal.hxx`（质心动量矩阵 $A_g$）→ `constrained-dynamics.hxx` → `constraint-cholesky-def.hxx` |
+| **配套** | 本指南 [§4.6](#46-质心动量学) / [§4.7](#47-接触约束动力学) + [docs/floating-base-and-contact-dynamics.md](docs/floating-base-and-contact-dynamics.md) |
+
+这是**人形方向的分水岭**。$A_g$ 与 $h_g$ 支撑 ZMP / Capture Point / 质心 MPC；
+KKT + Delassus 支撑接触力求解与 WBC。
+
+> 注意文件名：接触 Cholesky 是 `constraint-cholesky-{decl,def}.hxx`（不是 `contact-cholesky.hxx`）；
+> 另有 `contact-dynamics.hxx`、`contact-inverse-dynamics.hxx`、`loop-constrained-aba.hxx`。
+
+**自检**：
+- 为什么关节力矩 $\tau$ 不出现在质心动力学方程里？这对控制意味着什么？
+- 接触约束为什么要写成 $J\ddot q = -\gamma$ 而不是 $J\dot q = 0$？
+- Baumgarte 稳定化在解决什么问题？
+
+---
+
+#### 第 6 步：解析梯度（读完正算法再读其导数）
+
+| 文件 | 前置 |
+|---|---|
+| `rnea-derivatives.hxx` | 先读懂 `rnea.hxx` |
+| `aba-derivatives.hxx` | 先读懂 `aba.hxx` + 上一行 |
+| `kinematics-derivatives.hxx` | 先读懂 `kinematics.hxx` |
+| `centroidal-derivatives.hxx` / `constrained-dynamics-derivatives.hxx` | 对应正算法 |
+
+配套本指南 [§4.8](#48-解析梯度)。**务必成对读**：导数算法的结构与正算法一一对应，
+单独读导数会完全摸不着头脑。
+
+**自检**：
+- `∂τ/∂a` 为什么恰好等于 $M(q)$？
+- `data.Minv` 有什么使用陷阱？
+- `∂q̈/∂q` 是 DDP 的 $A_k$ 吗？
+
+---
+
+#### 第 7 步：按需扩展
+
+| 方向 | 入口 |
+|---|---|
+| 建模来源 | `parsers/urdf`、`parsers/srdf` |
+| 碰撞几何 | `collision/`、`src/algorithm/geometry.hxx` |
+| 高级标量 | `autodiff/`（CppAD/CasADi）、`codegen/` |
+| **加新关节类型** | `doc/e-development/Implement_a_new_joint.md`（官方教程） |
+| 并行 | `src/multibody/pool/`、`src/algorithm/parallel/` |
+
+### 14.2 按目标裁剪路线
+
+不必全读。按你的方向挑：
+
+| 目标 | 必读 | 可跳过 |
+|---|---|---|
+| **人形全身控制 / WBC** | 0→1→2→3→4→5 | 第 6 步的高阶导数、codegen |
+| **轨迹优化 / MPC（DDP）** | 0→1→2→4→6 | 碰撞、parsers |
+| **惯量参数辨识** | 1（尤其 `inertia.hxx`）→ `regressor.hxx` | ABA、接触、李群细节 |
+| **只想会用不想改源码** | 0→1→3，其余当 API 手册查 | 全部 `.hxx` 实现体 |
+| **要加新关节/新算法** | 全部，且必须做 §11 的三个实验 | — |
+
+### 14.3 三个贯穿始终的习惯
+
+1. **对照单测读实现** —— `unittest/<algo>.cpp` 给出该算法的期望输入输出，
+   是最可靠的"实现真值"。看不懂某个中间量时，去单测里找它被断言成什么。
+
+2. **对照第 4 章读 `.hxx`** —— 每个 `impl::*Step` 都能在第 4 章找到对应公式。
+   **公式讲"为什么"，代码讲"怎么写"**，两边对读效率最高。
+
+3. **动手验证而非默读** —— 本指南与 `docs/` 下各文档的数值结论都是实测的。
+   你也该这么做：写十行程序把某个恒等式（如 $\mathbf{I}\cdot\mathbf{I}^{-1}=E$、
+   `aba(rnea(a))==a`）跑一遍。**跑通一次胜过读十遍**，且能立刻暴露理解偏差。
+
+### 14.4 配套文档索引
+
+| 文档 | covers |
+|---|---|
+| 本指南 | 数学原理 + 架构机制 + 全部 demo |
+| [docs/空间代数运算解析.md](docs/空间代数运算解析.md) | `spatial/` 逐运算：公式↔代码↔几何↔用途 |
+| [docs/multibody子系统解析.md](docs/multibody子系统解析.md) | `multibody/` 逐文件逐方法 |
+| [docs/源码解析.md](docs/源码解析.md) | 模板机制 / 访问者三件套 |
+| [docs/C++语法技巧.md](docs/C++语法技巧.md) | 读源码需要的 C++ 语法点 |
+| [docs/类结构图.md](docs/类结构图.md) | UML 类图 |
+| [docs/floating-base-and-contact-dynamics.md](docs/floating-base-and-contact-dynamics.md) | 浮动基与接触动力学专题 |
+| [doc/architecture-tutorial/](doc/architecture-tutorial/) | **可运行**的三大机制实验 |
