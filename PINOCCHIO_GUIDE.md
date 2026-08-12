@@ -3177,7 +3177,7 @@ typename CastType<NewScalar, ModelTpl<...>>::type ModelTpl<...>::cast() const
 > **注意区分"自动微分"与"解析梯度"**：库里 `computeRNEADerivatives` / `computeABADerivatives`
 > （`*-derivatives.hxx`）是**手写推导的闭式导数**，更快，是 DDP 等实时优化的主力；上面的 AD 路线则是
 > **通用机制**——对任意算法都能求导，主要用于**验证**手写解析导数、以及经 CasADi 导出 C 代码。二者互补，
-> 解析梯度并非由 AD 生成。**深入实现与 `static-if` 可微分支机制见 [doc/源码解析.md 条目 3](doc/源码解析.md)。**
+> 解析梯度并非由 AD 生成。**深入实现与 `static-if` 可微分支机制见 [docs/源码解析.md 条目 3](docs/源码解析.md)。**
 
 > **读源码技巧**：看到冗长签名 `template<typename Scalar, int Options, template<typename,int> class JointCollectionTpl>`
 > 时，心里把 `Scalar`→`double`、`ModelTpl<...>`→`Model` 一替换，signature 立刻清爽。反过来，
