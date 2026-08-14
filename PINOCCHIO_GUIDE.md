@@ -1416,29 +1416,60 @@ $$
 
 #### 4.8.4 运动学梯度
 
-用于 Frame 速度/加速度对 $(q,\dot q)$ 的偏导，WBC 与 Frame 空间 MPC 必需：
+用于 Frame/关节的速度、加速度对 $(q,\dot q,\ddot q)$ 的偏导，WBC 与 Frame 空间 MPC 必需。
 
-$$
-\frac{\partial\nu_i}{\partial q},\quad
-\frac{\partial a_i}{\partial q},\quad
-\frac{\partial a_i}{\partial\dot q},\quad
-\frac{\partial a_i}{\partial\ddot q}
-$$
+**出发点**是这两条运动学关系：
 
-两个恒等式值得记住（见 [`kinematics-derivatives.cpp`](examples/kinematics-derivatives.cpp)）：
+$$\nu = J(q)\,\dot q, \qquad a = J(q)\,\ddot q + \dot J(q,\dot q)\,\dot q$$
 
-$$
-\frac{\partial\nu_i}{\partial\dot q} = \frac{\partial a_i}{\partial\ddot q} = J_i(q)
-$$
+`getJointAccelerationDerivatives` 返回四个 $6\times n_v$ 矩阵，就是 $\nu$、$a$ 对三个状态量的偏导：
 
-即"速度对速度"与"加速度对加速度"的偏导都等于几何 Jacobian。正因二者相同，
-`getJointAccelerationDerivatives` 不单独返回 $\partial\nu_i/\partial\dot q$。
+| 变量 | 数学 | 直观理解 |
+|---|---|---|
+| `v_partial_dq` | $\partial\nu/\partial q$ | 姿态变化 → 末端**速度**变化 |
+| `a_partial_dq` | $\partial a/\partial q$ | 姿态变化 → 末端**加速度**变化 |
+| `a_partial_dv` | $\partial a/\partial\dot q$ | 关节速度变化 → 末端加速度变化 |
+| `a_partial_da` | $\partial a/\partial\ddot q = J(q)$ | 关节加速度变化 → 末端加速度变化 |
+
+**最重要的一条恒等式**：
+
+$$\boxed{\ \frac{\partial\nu}{\partial\dot q} = \frac{\partial a}{\partial\ddot q} = J(q)\ }$$
+
+推导很直接：$a = J\ddot q + \dot J\dot q$ 中第二项与 $\ddot q$ 无关，对 $\ddot q$ 求导只剩 $J$；
+同理 $\nu = J\dot q$ 对 $\dot q$ 求导得 $J$。**正因二者是同一个矩阵**，
+`getJointAccelerationDerivatives` 不单独返回 $\partial\nu/\partial\dot q$
+（源码注释 *"we are not directly computing the quantity v_partial_dv as it is also equal to a_partial_da"* 说的就是这件事）。
+
+对 UR5（6 自由度）而言 $J\in\mathbb{R}^{6\times6}$，其第 $i$ 列表示
+**"只让第 $i$ 个关节加速时，末端 6D 空间加速度的变化"**。
+
+> ⚠️ **`v_partial_dq` 不是 Jacobian** —— 这是最容易搞混的一点。
+> 两连杆平面臂实测（$q=(0.3,0.5)$，LOCAL 系）：
+>
+> | | 第 1 列 | 第 2 列 |
+> |---|---|---|
+> | `v_partial_dq` | $(0,0,0,0,0,0)$ | $(1.755,-0.959,0,0,0,0)$ |
+> | $J$ | $(0.479,0.878,0,0,0,1)$ | $(0,0,0,0,0,1)$ |
+>
+> 完全不同。`v_partial_dq` 第 1 列全零有明确物理含义：在 LOCAL 系下，
+> 转动第一个关节相当于整条臂绕根部旋转，**"末端看自己"的速度不变**。
+
+`a_partial_dq` 与 `a_partial_dv` 刻画的是 $\dot J\dot q$ 一项的敏感度，
+即**科氏力、向心加速度**等速度相关效应的来源。
 
 ```python
-pin.computeForwardKinematicsDerivatives(model, data, q, v, a)
+pin.computeForwardKinematicsDerivatives(model, data, q, v, a)   # 必须先调用
 pin.getJointVelocityDerivatives(model, data, jid, pin.LOCAL)
 pin.getJointAccelerationDerivatives(model, data, jid, pin.LOCAL)
 ```
+
+> ⚠️ **C++ 侧必须先 `setZero()`**：这些算法沿运动树**累加**写入各关节的贡献，
+> 不是覆盖写入。不清零等于往垃圾值上累加，且不会报错
+> （与 [§4.8.1](#481-rnea-梯度) 中 RNEA 导数 *"must be first initialized with zeros"* 同理）。
+
+> **参考系**：四个矩阵的数值随 `ReferenceFrame` 完全改变，但 $\partial a/\partial\ddot q = J$
+> 在每个参考系内部都成立（$J$ 取同一参考系）。末端任务通常用 `LOCAL_WORLD_ALIGNED`
+> 而非 `WORLD`，原因见 [§2.2.7](#227-参考系local--world--local_world_aligned)。
 
 ---
 
