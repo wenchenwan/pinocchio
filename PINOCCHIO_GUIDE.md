@@ -1361,12 +1361,38 @@ pin.computeABADerivatives(model, data, q, v, tau)
 data.ddq_dq, data.ddq_dv, data.Minv
 ```
 
-> ⚠️ **`data.Minv` 只填充上三角！** 这是文档明确声明的行为
-> （[`aba-derivatives.hpp:154`](include/pinocchio/algorithm/aba-derivatives.hpp#L154)），
-> 实测下三角确为残留值。直接拿它做矩阵乘法会得到错误结果，须先对称化：
+> ⚠️ **三角填充陷阱（务必实测确认）**
 >
+> Pinocchio 的若干矩阵输出**只填上三角**，直接参与矩阵乘法会静默给出错误结果。
+> 但"哪些是、哪些不是"在不同重载间并不一致，头文件注释也有与实现不符之处。
+> 以下为 **Pinocchio 3.6.0 实测结论**：
+>
+> | 调用 | 输出 | 实测 |
+> |---|---|---|
+> | C++ `crba(model,data,q)` | 返回的 `M` | **仅上三角** |
+> | Python `pin.crba(...)` | 返回值 | 完整对称（绑定层已对称化） |
+> | `computeRNEADerivatives(...,dq,dv,da)` | `da` $=\partial\tau/\partial a$ | **仅上三角** |
+> | `computeRNEADerivatives(m,d,q,v,a)` | `data.M` | **仅上三角** |
+> | `computeABADerivatives(m,d,q,v,tau)` | `data.Minv` | **完整对称** |
+> | `computeABADerivatives(...,dq,dv,dtau)` | `dtau` | 完整对称 |
+> | 同上 | 该次调用的 `data.Minv` | **仅上三角** |
+>
+> > 注：`aba-derivatives.hpp` 的 Doxygen 注释称"only the upper triangular part of
+> > `data.Minv` is filled"，但对无输出参数的重载**实测为完整对称**
+> > （$\lVert \texttt{Minv} - M^{-1}\rVert = 7.9\times10^{-15}$，下三角同样正确）。
+> > 文档与实现存在出入，**以实测为准**。
+>
+> **后果有多严重**：用未对称化的 $M$ 代入运动方程实测
+> $\lVert Mа+\text{nle}-\tau\rVert = 1.48$，对称化后为 $2.4\times10^{-15}$ —— 相差 15 个数量级，
+> 且**不会有任何报错**。
+>
+> **防御性写法**（无论该矩阵是否已完整，对称化都不会出错）：
+>
+> ```cpp
+> Eigen::MatrixXd M_full = M.selfadjointView<Eigen::Upper>();   // C++
+> ```
 > ```python
-> Minv = np.triu(data.Minv) + np.triu(data.Minv, 1).T
+> M_full = np.triu(M) + np.triu(M, 1).T                          # Python
 > ```
 
 #### 4.8.3 与 DDP 的状态空间矩阵的关系

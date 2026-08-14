@@ -67,6 +67,20 @@ int main(int argc, char ** argv)
   std::cout << "Joint acceleration: " << data.ddq.transpose() << std::endl;
 
   // 可选：访问导数矩阵用于 DDP/iLQR
-  // djoint_acc_dtau = data.Minv（M(q) 的逆矩阵）
+  // djoint_acc_dtau = M(q)⁻¹
+  //
+  // 与 RNEA 导数不同，本例这个【显式输出参数】版本的 djoint_acc_dtau
+  // 是【完整对称】的，可直接使用（实测严格下三角非零且数值正确）。
+  //
+  // ⚠️ 但同一次调用中的 data.Minv 只填了上三角（它被当作中间缓冲）。
+  //   两个"看似等价"的东西三角性不同：
+  //     computeABADerivatives(m,d,q,v,tau)            → data.Minv 完整对称
+  //     computeABADerivatives(m,d,q,v,tau,dq,dv,dtau) → dtau 完整、data.Minv 仅上三角
+  //   所以要用 M⁻¹ 时，请用【你自己传进去的 dtau】，而不是顺手去读 data.Minv。
+  //
+  //   对比：RNEA 导数的 ∂τ/∂a 在两种形式下【都】只有上三角，
+  //   必须 .selfadjointView<Eigen::Upper>() 才能当 M(q) 用
+  //   （见 examples/inverse-dynamics-derivatives.cpp 的说明）。
+  //
   // std::cout << "M_inv (=ddq/dtau):\n" << djoint_acc_dtau << std::endl;
 }
