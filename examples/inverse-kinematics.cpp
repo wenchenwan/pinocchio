@@ -82,6 +82,9 @@ int main(int /* argc */, char ** /* argv */)
     // Jlog6(M) ∈ R^{6×6}：d(log6(M))/dM 在 M 处的导数
     // 注意：传入 iMd.inverse() 而非 iMd（与 Python 版的 -Jlog 对应）
     pinocchio::Data::Matrix6 Jlog;
+
+    // iMd描述的是局部关节坐标系的位姿误差，对其取逆进行对数变换就会得到左雅可比（左扰动雅可比）
+    // Jlog6实际计算的右扰动雅可比（右扰动雅可比），所以需要对其取逆来得到左扰动雅可比
     pinocchio::Jlog6(iMd.inverse(), Jlog);
     // 修正后的 Jacobian（负号来自 iMd 对 q 的偏导方向）
     J = -Jlog * J;
