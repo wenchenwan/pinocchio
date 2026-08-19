@@ -111,7 +111,7 @@ struct ModelTpl
 
 `traits<ModelTpl>` 暴露 `Scalar`/`Options`/`Data`/`JointCollection`。注意 **`Data` 类型是从 `Model` 反查出来的**（`traits<ModelTpl>::Data`），所以 `Model` 与 `Data` 严格配对。
 
-### 2.2 四套维度与索引体系（关键）
+### 2.2 三套维度与索引体系（关键）
 
 这是理解 Pinocchio 数据布局的钥匙。每个关节在几个不同维度的**全局向量**里各占一段：
 
@@ -119,26 +119,144 @@ struct ModelTpl
 |------|--------|-------------------|------|
 | **位形空间** $q$ | `nq` | `nqs[i]` / `idx_qs[i]` | 位形向量维度。可 > nv（球副 nq=4、nv=3） |
 | **速度/切空间** $v$ | `nv` | `nvs[i]` / `idx_vs[i]` | 广义速度、力矩、加速度维度 |
-| **扩展速度空间** | `nvExtended` | `nvExtendeds[i]` / `idx_vExtendeds[i]` | **展开 mimic 后**的速度维度 |
+| **扩展速度空间** | `nvExtended` | `nvExtendeds[i]` / `idx_vExtendeds[i]` | 雅可比列空间，**展开 mimic 后**的速度维度 |
 | 树节点计数 | `njoints` / `nbodies` / `nframes` | — | 关节数（含 universe）/ 刚体数 / 坐标系数 |
 
-**为什么 $n_q \neq n_v$**：位形住在**弯曲流形**上（球副姿态属于 $SO(3)$，用 4 维四元数存但只有 3 个自由度），
-速度住在**切空间**。二者的桥是李群 exp/log（见 §10）。
+声明处：`nq/nv/nvExtended` 在 `model.hxx:93-100`，三对索引表在 `model.hxx:120-136`。
 
-**`nvExtended` 是什么**（现有资料常缺）：mimic（耦合）关节被折叠后，`nv` 只数**独立**自由度，
-而 `nvExtended` 数的是**展开后**的自由度。实测（Baxter，含两对 mimic 夹爪）：
+#### 2.2.1 `nqs[i]` / `idx_qs[i]` 的读法
+
+这两张表就是**关节 id → 位形向量 $q$ 中的切片**的查找表：
+
+- `nqs[i]`：第 $i$ 个关节在位形空间里占几维，即 $\dim\mathcal{Q}_i$
+- `idx_qs[i]`：这一段在全局 $q$ 里的起始下标
+
+$$q_i = q\big[\;\texttt{idx\_qs}[i]\;:\;\texttt{idx\_qs}[i]+\texttt{nqs}[i]\;\big]\in\mathbb{R}^{\texttt{nqs}[i]}$$
+
+**源码里从不手写这个 segment**，而是用 `joint-model-base.hxx:330` 的 `jointConfigSelector`，
+它内部就是 `segment(idx_q(), nq())`；速度侧对应 `jointVelocitySelector`（`segment(idx_v(), nv())`）。
+矩阵版还有 `jointCols` / `jointRows` / `jointBlock` 三组，语义同理。
+
+#### 2.2.2 为什么必须存这两张表（而不是用 `i` 直接索引 `q`）
+
+因为 **$\dim q \neq \dim v$**。位形空间是流形 $\mathcal{Q}=\prod_i\mathcal{Q}_i$，
+速度活在它的切空间 $T_q\mathcal{Q}$（李代数），两者维数不同：
+
+| 关节类型 | `nqs[i]` | `nvs[i]` | 位形的参数化 |
+|---|---|---|---|
+| Revolute / Prismatic | 1 | 1 | $\theta$ |
+| RevoluteUnbounded（连续转） | 2 | 1 | $(\cos\theta,\sin\theta)$ |
+| Spherical | 4 | 3 | 单位四元数 $\mathbf{q}\in S^3$ |
+| FreeFlyer（浮动基） | 7 | 6 | $(p,\mathbf{q})\in SE(3)$ |
+| Universe（`i=0`） | 0 | 0 | — |
+
+所以关节 $i$ 在 $q$ 里的偏移和在 $v$ 里的偏移是**两套完全不同的累加**，必须分别记：
+`idx_qs/nqs` 走 $q$，`idx_vs/nvs` 走 $v$。
+
+这也是 `integrate` 存在的原因——不能写 $q \leftarrow q + v\,\delta t$，只能
+
+$$q \leftarrow q \oplus (v\,\delta t),\qquad \oplus:\mathcal{Q}\times\mathbb{R}^{n_v}\to\mathcal{Q}$$
+
+而 $\oplus$ 的实现（`liegroup-algo.hxx`）正是按 `nqs[i]/nvs[i]` 逐关节分派到各自李群的 `exp` 上（见 §10）。
+
+#### 2.2.3 `njoints` 与 `nq` 的关系
+
+**两者之间没有固定关系式**——`njoints` 数的是"树上有几个铰"，`nq` 数的是"位形向量有多长"。
+唯一严格成立的是求和式：
+
+$$n_q=\sum_{i=1}^{\text{njoints}-1}\texttt{nqs}[i]$$
+
+求和从 **1** 开始，因为下标 0 是 universe（`nqs[0] = 0`）。即「真实关节数 = `njoints - 1`」。
+换句话说：**`njoints` 是计数，`nq` 是加权和**，权重就是每个关节的 `nqs[i]`。
+
+本仓库自带样例模型实测：
+
+```
+manipulator : njoints=7   nq=6   nv=6
+humanoid    : njoints=30  nq=35  nv=34
+```
+
+humanoid 的构成（按关节类型拆开）：
+
+| 关节类型 | 个数 | 每个 `nq` | 对 `nq` 的贡献 |
+|---|---|---|---|
+| universe（id=0） | 1 | 0 | 0 |
+| `JointModelFreeFlyer` | 1 | 7 | 7 |
+| 各类 revolute | 28 | 1 | 28 |
+| **合计** | **30** | | **35** |
+
+三种典型情形：
+
+| 情形 | 关系 | 例子 |
+|---|---|---|
+| 纯单自由度关节链（工业臂） | $n_q = \text{njoints}-1$ | manipulator：$7-1=6$ |
+| 带浮动基（人形/四足） | $n_q = \text{njoints}+5$ | humanoid：$30+5=35$ |
+| 含 mimic 关节 | $n_q < \text{njoints}-1$ | mimic 的 `nqs[i] = 0`，白占一个 id |
+
+浮动基那条为什么是 $+5$：FreeFlyer 一个关节贡献 7 维而不是 1 维，
+比"每关节 1 维"的基线多出 6，于是 $(\text{njoints}-1)+6$。
+
+上下界：$0 \le n_q \le 7\,(\text{njoints}-1)$，上界取在全是 FreeFlyer 时，下界取在全是 mimic 时。
+
+> **三个容易混的点**
+> 1. `njoints` **不是自由度数**。要自由度用 `nv`，要状态向量长度用 `nq`，两个都不等于 `njoints`。
+> 2. URDF 里的 `<joint>` 标签数 **≠** `njoints`：`fixed` 类型关节在解析时被折叠，
+>    不进 `joints` 而是变成一个 `Frame`。40 个 `<joint>` 的 URDF 可能只建出 20 个关节。
+> 3. `nbodies` 与 `njoints` 通常相等但语义不同：前者数刚体，后者数铰。
+>    用 `appendBodyToJoint` 往同一关节挂多个刚体时两者分离。
+
+#### 2.2.4 索引表如何建立：前缀和
+
+`addJoint`（`model.hxx:866-898`）里同步维护三套表：
+
+```cpp
+jmodel.setIndexes(joint_id, nq, nv, nvExtended);  // 把当前累加值当作本关节的起始偏移
+...
+nq += joint_nq;              // 先给自己发号，再累加
+nqs.push_back(joint_nq);
+idx_qs.push_back(joint_idx_q);
+```
+
+关键点：`setIndexes` 传进去的 `nq` 是**添加本关节之前**的总维数，所以它天然就是本关节的 `idx_q`。
+也就是前缀和
+
+$$\texttt{idx\_qs}[i]=\sum_{k<i}\texttt{nqs}[k]$$
+
+因此**布局顺序 = 关节添加顺序**；而 Pinocchio 保证 `parents[i] < i`（父节点先添加），
+于是 $q$ 里的分段天然按拓扑序排列，`idx_qs` 严格递增。
+`setIndexes` 同时把全局起点**写回关节对象自身**——这就是 `jmodel.idx_q()` 能从全局 `q` 里
+取出自己那几维的机制。
+
+#### 2.2.5 三个容易踩的陷阱
+
+1. **下标 0 永远是 universe**。构造函数里 `idx_qs(1,0), nqs(1,0), idx_vs(1,0), nvs(1,0)`
+   （`model.hxx:264-269`）是给 `id=0` 的 universe 关节占位的，它不消耗任何自由度，全为 0。
+   真实关节从 1 开始——这是读 Pinocchio 时最常见的偏移错误。
+2. **`nqs[i]` 不是子树的维度**，只是这一个关节自己的。子树用 `subtrees[i]` / `data.nvSubtree[i]`。
+3. **`Data` 里的量按 `idx_v` 排布，不是 `idx_q`**：`J`、`M`、`tau`、`nle` 全是 $n_v$ 维/列的
+   （`model.hxx:959-966` 建稀疏模式时用的就是 `idx_vs/nvs`）。只有 $q$ 本身，以及
+   `lowerPositionLimit/upperPositionLimit/positionLimitMargin` 用 `idx_q`。
+
+#### 2.2.6 `nvExtended` 概览
+
+`nvExtended`（`model.hxx:99-100`，文档里叫 *jacobian space*）是第三套索引空间：
+
+- `nv` = **独立**自由度个数（$\dot q$、$M$、$\tau$ 的维数）
+- `nvExtended` = **树里所有关节各自贡献的运动子空间列数之和**，不管它们是否独立
+
+每个具体关节的 `traits` 里 `NVExtended` 与 `NV` 取**同一个编译期常量**
+（如 `joint-revolute.hxx:641` 的 `NVExtended = 1`、`joint-free-flyer.hxx:158` 的 `= 6`），
+默认的 `nvExtended_impl()` 直接返回它（`joint-model-base.hxx:167-170`）。
+所以**普通模型里 `nvExtended == nv`，三套索引完全重合，这套机制零开销地消失**。
+唯一重写它的是 **`JointModelMimic`**。实测（Baxter，含两对 mimic 夹爪）：
 
 | 模型 | `nq` | `nv` | `nvExtended` |
 |---|---|---|---|
 | `buildModelFromUrdf(path)`（忽略 mimic） | 19 | 19 | 19 |
 | `buildModelFromUrdf(path, mimic=True)` | 17 | **17** | **19** |
 
-即 mimic 模型少了 2 个独立自由度，但内部仍需按 19 维展开来做递推（然后用传动矩阵 $G$ 投影回 17 维）。
-无 mimic 时三者一致，故平时感觉不到它。
-
-`addJoint` 里同步维护这些：`nq += joint_nq; idx_qs.push_back(...)`，
-并用 `jmodel.setIndexes(joint_id, nq, nv, nvExtended)` 把全局起点**写回关节对象自身**——
-这就是关节能用 `jmodel.idx_q()` 从全局 `q` 里取出自己那几维的机制。
+即 mimic 模型少了 2 个独立自由度，但内部仍需按 19 列展开来做递推，
+再用传动矩阵 $G$ 投影回 17 维。**完整机制见 §9.2**。
 
 ### 2.3 全部数据字段（按用途分组）
 
@@ -837,23 +955,134 @@ $S$ 为各子关节 $S$ 经相对变换后拼成的 $6\times n_v$ 稠密矩阵�
 **代价**：$S$ 变稠密，失去 §6.3 的稀疏红利，
 故仅在确有需要时使用。其 `calc` 内部对子关节逐个调用并做变换复合。
 
-### 9.2 Mimic（`joint-mimic.hxx`）
+### 9.2 Mimic（`joint-mimic.hxx`）与 `nvExtended` 的完整机制
 
 把一个关节的位形**线性绑定**到另一个关节：
 
-$$q_{\text{mimic}} = \text{scaling}\cdot q_{\text{mimicked}} + \text{offset}$$
+$$q_m = k\,q_p + b,\qquad \dot q_m = k\,\dot q_p$$
 
-**自身 $n_q = n_v = 0$**——它不贡献独立自由度，这正是 mimic 模型 `nv` 变小的原因；
-但递推时仍需按展开维度计算，故有了 `nvExtended`（见 §2.2）。
+（$k=$ `scaling`，$b=$ `offset`，下标 $m$ = mimicking，$p$ = mimicked/primary。）
 
 Model 里用 `mimicking_joints` / `mimicked_joints` 记录绑定关系
 （实测 Baxter：`mimicking=[10,19]`、`mimicked=[9,18]`）。
-
-数学上等价于引入传动矩阵 $G$：$\tau_{\text{mimic}} = G\tau_{\text{full}}$、
-$M_{\text{mimic}} = GM_{\text{full}}G^\top$（见 `examples/mimic_dynamics.py`，
-该例还用 `model == model2` 验证手工 `transformJointIntoMimic` 与 URDF 解析结果一致）。
-
 **典型场景**：夹爪两指齿轮耦合、并联传动、差速驱动。
+
+#### 9.2.1 三个维度的取值
+
+`JointModelMimic` 的三个维度（`joint-mimic.hxx:614-623`）：
+
+```cpp
+inline int nq_impl()         const { return 0; }            // 不占 q
+inline int nv_impl()         const { return 0; }            // 不占 v
+inline int nvExtended_impl() const { return m_nvExtended; } // 但占雅可比一列
+```
+
+物理含义：mimic 关节**不是**一个新自由度（所以 `nq=nv=0`），
+但它**确确实实是树上一个会转的铰**，有自己的 $S_m$、自己的 $^0X_m$，
+前向递推必须给这一列留位置。这块位置就是 `idx_vExtended`。
+
+配套地，`setMimicIndexes`（`joint-mimic.hxx:651-661`）把 `idx_q/idx_v` 直接指向**被模仿关节**
+的那一段——注意 `setIndexes_impl` 刻意**不覆盖** `i_q/i_v`，只写 `i_vExtended`。
+于是 `calc` 里 `qs.segment(Base::i_q, m_nqExtended)` 读到的就是主关节的位形。
+
+#### 9.2.2 例子：耦合夹爪
+
+| id | 关节 | `nq` | `nv` | `nvExtended` | `idx_q` | `idx_v` | `idx_vExtended` |
+|---|---|---|---|---|---|---|---|
+| 0 | universe | 0 | 0 | 0 | 0 | 0 | 0 |
+| 1 | finger_left (revolute) | 1 | 1 | 1 | 0 | 0 | 0 |
+| 2 | finger_right (mimic of 1, $k=-1$) | 0 | 0 | 1 | **0** | **0** | **1** |
+
+$\Rightarrow$ `model.nq = 1`，`model.nv = 1`，`model.nvExtended = 2`。
+
+注意 id=2 那行：`idx_q/idx_v` 回指到 0（读同一个 $q$ 分量），`idx_vExtended` 是自己独有的 1。
+
+#### 9.2.3 数学表述
+
+设扩展雅可比 $J_{\text{ext}}\in\mathbb{R}^{6\times n_v^{\text{ext}}}$，每一列是一个关节的运动子空间
+在世界系下的表达：
+
+$$J_{\text{ext}}=\begin{bmatrix} {}^{0}X_{1}S_{1} & \cdots & {}^{0}X_{i}S_{i}\end{bmatrix}$$
+
+这正是 `data.hxx:361-369` 注释里写的东西，也是那里特别强调
+"This Jacobian has no special meaning" 的原因。
+
+耦合关系是一个常值线性映射 $G\in\mathbb{R}^{n_v^{\text{ext}}\times n_v}$：
+
+$$\dot q_{\text{ext}} = G\,\dot q,\qquad J = J_{\text{ext}}\,G$$
+
+夹爪例子里 $G=\begin{bmatrix}1\\-1\end{bmatrix}$。动力学侧对应
+$\tau_{\text{mimic}}=G^\top\tau_{\text{full}}$、$M_{\text{mimic}}=G^\top M_{\text{full}}G$
+（见 `examples/mimic_dynamics.py`，该例还用 `model == model2` 验证手工
+`transformJointIntoMimic` 与 URDF 解析结果一致）。
+
+**关键实现细节**：Pinocchio 不显式存 $G$。缩放系数 $k$ 被提前折进了运动子空间本身——
+`ScaledJointMotionSubspaceTpl::matrix_impl` 直接返回 $k\,S$（`joint-mimic.hxx:182`）。
+所以 $J_{\text{ext}}$ 的第 2 列已经是 $-\,{}^{0}X_2S_2$，$G$ 退化成纯 0/1 的"求和模板"，
+折叠时就是**列相加**。
+
+#### 9.2.4 落地：`Data.J` 是 `nvExtended` 列
+
+```cpp
+, J(Matrix6x::Zero(6, model.nvExtended))     // data.hxx:728
+, dJ(Matrix6x::Zero(6, model.nvExtended))
+, ddJ(Matrix6x::Zero(6, model.nvExtended))
+```
+
+`getJointJacobian` 的输入输出维度差异写得非常明白（`jacobian.hxx:188-191`）：
+
+```cpp
+PINOCCHIO_CHECK_ARGUMENT_SIZE(Jin.cols(),  model.nvExtended);  // 内部缓冲
+PINOCCHIO_CHECK_ARGUMENT_SIZE(Jout.cols(), model.nv);          // 交给用户的
+```
+
+折叠动作是 `jacobian.hxx:219-235` 的**两趟循环**：
+
+```cpp
+// 第一趟：非 mimic 的支撑链，赋值
+for (jExtended = colRef; jExtended >= 0;
+     jExtended = data.non_mimic_parents_fromRow[jExtended])
+    v_out = v_in;      // v_out 绑定 Jout.col(idx_vExtended_to_idx_v_fromRow[jExtended])
+
+// 第二趟：mimic 链，累加到被模仿列上
+for (jExtended = colRefMimicPass; jExtended >= 0;
+     jExtended = data.mimic_parents_fromRow[jExtended])
+    v_out += v_in;     // 同一个输出列，+=
+```
+
+三张查找表各司其职（`data.hxx:322-351`，在 `DataTpl` 构造函数 `data.hxx:891-950` 里填好）：
+
+| 表 | 含义 |
+|---|---|
+| `idx_vExtended_to_idx_v_fromRow[e] = v` | 扩展列 $e$ 该加到输出列 $v$ 上，即 $G$ 的稀疏表示 |
+| `non_mimic_parents_fromRow[e]` | 支撑链上前一个**非 mimic** 列 |
+| `mimic_parents_fromRow[e]` | 支撑链上前一个 **mimic** 列 |
+
+后两张是把原来的 `parents_fromRow` 一分为二：一条支撑链拆成两条子链，
+才能一趟 `=` 一趟 `+=`；否则先赋值的会被后来的覆盖掉。
+`check-data.hxx:84-142` 校验了这三张表的长度都是 `nvExtended`，
+且无 mimic 时 `parents_fromRow` 与两者一致。
+
+CRBA 同理（`crba.hxx:186-211`）：用 `idx_vExtendeds` 取 $J_{\text{ext}}$ 的列算力，
+但写回 `data.M` 时用 `idx_vs`——因为 $M\in\mathbb{R}^{n_v\times n_v}$ 始终是压缩后的。
+
+#### 9.2.5 为什么要设计这第三套索引
+
+因为**前向递推必须是局部的**。`forwardKinematics` / `computeJointJacobians` 沿树走一遍，
+每个关节只知道自己的 $^0X_i$ 和 $S_i$，不知道自己有没有被别人 mimic、被谁 mimic。
+如果直接往 $n_v$ 列的矩阵里写，两个耦合关节会抢同一列，就得在递推内部做条件判断和累加，
+破坏 pass 的规整性与 SIMD 友好性。
+
+`nvExtended` 的做法是：**递推阶段一律按"每个铰一列"无脑写，耦合的归约推迟到取用阶段**
+（`getJointJacobian` 的那两趟循环）。代价是 $J$ 多占几列内存，
+收益是核心 RNEA/CRBA/ABA 的 pass 结构对 mimic 完全无感知。
+
+#### 9.2.6 三句话总结
+
+1. `nv` 是**求解器看到的**维数（$M$、$\tau$、$\dot q$）；`nvExtended` 是**几何递推看到的**维数（$J$、$\dot J$、$\ddot J$ 的列数）。
+2. 没有 mimic 关节时两者恒等，`idx_vs == idx_vExtendeds`，这套机制零开销地消失。
+3. 遇到 `data.J` 时永远别假设它有 `nv` 列——要拿有物理意义的雅可比，
+   必须走 `getJointJacobian` / `getFrameJacobian`，它们负责把 $J_{\text{ext}}$ 乘上 $G$。
 
 ### 9.3 Unaligned 系列
 
@@ -1126,6 +1355,9 @@ for each frame f:
 | 想找… | 去哪个文件 | 关键类型/函数 |
 |-------|-----------|--------------|
 | 机器人的树结构、维度 | `model.hxx` | `ModelTpl`，`nq/nv`，`parents/supports/subtrees` |
+| `njoints` 和 `nq` 差在哪 | `model.hxx`（§2.2.3） | $n_q=\sum_{i\ge1}\texttt{nqs}[i]$；浮动基 $n_q=\text{njoints}+5$ |
+| 某关节在 q / v 里占哪几维 | `model.hxx`（§2.2） | `nqs/idx_qs`、`nvs/idx_vs`，用 `jointConfigSelector`/`jointVelocitySelector` 取 |
+| `data.J` 为什么列数不等于 `nv` | `model.hxx`+`jacobian.hxx`（§9.2） | `nvExtended`、`idx_vExtendeds`、`idx_vExtended_to_idx_v_fromRow` |
 | 某算法的中间量存哪 | `data.hxx` | `DataTpl` 对应字段（grep 字段名到 algorithm/） |
 | 坐标系 vs 关节 | `frame.hxx`,`model-item.hxx` | `FrameTpl`，`FrameType`，`oMf=oMi·placement` |
 | 加新关节类型 | `joint/joint-xxx.hxx` + `joint-collection.hxx` | 仿 revolute 写 Model/Data/Constraint/Motion/Transform |

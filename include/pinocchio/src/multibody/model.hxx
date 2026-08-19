@@ -19,11 +19,14 @@ namespace pinocchio
     typename Scalar,
     int Options,
     template<typename, int> class JointCollectionTpl>
+    // 定义cast之后的返回类型
   struct CastType<NewScalar, ModelTpl<Scalar, Options, JointCollectionTpl>>
   {
     typedef ModelTpl<NewScalar, Options, JointCollectionTpl> type;
   };
 
+  // traits 特化：把 Model 的关联类型（Scalar / Data / JointCollection）暴露出去。
+  // 注意 Data 是从 Model 反查出来的，因此 Model 与 Data 严格配对、不能混用。
   template<typename _Scalar, int _Options, template<typename, int> class JointCollectionTpl>
   struct traits<ModelTpl<_Scalar, _Options, JointCollectionTpl>>
   {
@@ -33,6 +36,15 @@ namespace pinocchio
     typedef JointCollectionTpl<Scalar, Options> JointCollection;
   };
 
+  // ===========================================================================
+  // ModelTpl：运动学树的「静态定义」，即"这台机器人是什么"。
+  //   - 只读语义：addJoint / addFrame 建模完成后，算法阶段不再修改它；
+  //     所有算法签名都是 (const Model &, Data &)，可被多线程共享。
+  //   - 与 DataTpl 的分工：Model 存不随位形变化的量（拓扑、惯量、限位），
+  //     Data 存随 q/v 变化的中间结果（oMi、J、M 等）。
+  //   - 三个基类：Serializable 提供序列化；NumericalBase 提供 Scalar typedef；
+  //     ModelEntity 是 CRTP 实体标记。
+  // ===========================================================================
   template<typename _Scalar, int _Options, template<typename, int> class JointCollectionTpl>
   struct ModelTpl
   : serialization::Serializable<ModelTpl<_Scalar, _Options, JointCollectionTpl>>
@@ -40,41 +52,45 @@ namespace pinocchio
   , ModelEntity<ModelTpl<_Scalar, _Options, JointCollectionTpl>>
   {
 
-    typedef typename traits<ModelTpl>::Scalar Scalar;
-    static constexpr int Options = traits<ModelTpl>::Options;
+    typedef typename traits<ModelTpl>::Scalar Scalar; // 标量类型（double / float / CppAD 等）
+    static constexpr int Options = traits<ModelTpl>::Options; // Eigen 对齐/存储选项
 
-    typedef typename traits<ModelTpl>::JointCollection JointCollection;
-    typedef typename traits<ModelTpl>::Data Data;
+    typedef typename traits<ModelTpl>::JointCollection JointCollection; // 关节"菜单"（variant）
+    typedef typename traits<ModelTpl>::Data Data;                       // 配对的 Data 类型
 
-    typedef SE3Tpl<Scalar, Options> SE3;
-    typedef MotionTpl<Scalar, Options> Motion;
-    typedef ForceTpl<Scalar, Options> Force;
-    typedef InertiaTpl<Scalar, Options> Inertia;
-    typedef FrameTpl<Scalar, Options> Frame;
+    // --- 空间代数基本类型（见 spatial/） ---
+    typedef SE3Tpl<Scalar, Options> SE3;         // 刚体位姿（旋转 + 平移）
+    typedef MotionTpl<Scalar, Options> Motion;   // 空间速度/加速度（旋量）
+    typedef ForceTpl<Scalar, Options> Force;     // 空间力（力旋量：力 + 力矩）
+    typedef InertiaTpl<Scalar, Options> Inertia; // 空间惯量（质量 + 质心 + 转动惯量）
+    typedef FrameTpl<Scalar, Options> Frame;     // 附着在关节上的操作坐标系
 
-    typedef pinocchio::Index Index;
-    typedef pinocchio::JointIndex JointIndex;
-    typedef pinocchio::GeomIndex GeomIndex;
-    typedef pinocchio::FrameIndex FrameIndex;
-    typedef std::vector<Index> IndexVector;
+    // --- 索引类型：全部是 std::size_t 的别名，仅用于语义区分 ---
+    typedef pinocchio::Index Index;           // 通用下标
+    typedef pinocchio::JointIndex JointIndex; // 关节下标（0 = universe）
+    typedef pinocchio::GeomIndex GeomIndex;   // 几何体下标（GeometryModel 用）
+    typedef pinocchio::FrameIndex FrameIndex; // 坐标系下标
+    typedef std::vector<Index> IndexVector;   // 下标列表（父子关系/支撑链/子树等）
 
-    typedef JointModelTpl<Scalar, Options, JointCollectionTpl> JointModel;
-    typedef JointDataTpl<Scalar, Options, JointCollectionTpl> JointData;
+    // --- 关节的类型擦除包装：variant，可在同一容器里存放任意关节类型 ---
+    typedef JointModelTpl<Scalar, Options, JointCollectionTpl> JointModel; // 关节的静态定义
+    typedef JointDataTpl<Scalar, Options, JointCollectionTpl> JointData;   // 关节的计算缓存
 
     typedef std::vector<JointModel> JointModelVector;
     typedef std::vector<JointData> JointDataVector;
 
     typedef std::vector<Frame> FrameVector;
 
-    typedef Eigen::Matrix<Scalar, Eigen::Dynamic, 1, Options> VectorXs;
-    typedef Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Options> MatrixXs;
-    typedef Eigen::Matrix<Scalar, 3, 1, Options> Vector3;
+    typedef Eigen::Matrix<Scalar, Eigen::Dynamic, 1, Options> VectorXs;              // 动态列向量
+    typedef Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic, Options> MatrixXs; // 动态矩阵
+    typedef Eigen::Matrix<Scalar, 3, 1, Options> Vector3;                            // 三维向量
 
     typedef std::vector<Inertia> InertiaVector;
     typedef std::vector<SE3> SE3Vector;
 
-    typedef Eigen::Matrix<bool, Eigen::Dynamic, 1, Options> BooleanVector;
-    typedef std::vector<Eigen::Index> EigenIndexVector;
+    // --- 稀疏模式相关（记录每个关节影响雅可比的哪些列） ---
+    typedef Eigen::Matrix<bool, Eigen::Dynamic, 1, Options> BooleanVector; // 稠密布尔掩码
+    typedef std::vector<Eigen::Index> EigenIndexVector;                    // 非零列的下标列表
     typedef std::vector<BooleanVector> VectorOfBooleanVector;
     typedef std::vector<EigenIndexVector> VectorOfEigenIndexVector;
 
@@ -89,195 +105,236 @@ namespace pinocchio
     ///        It also handles the notion of co-tangent vector (e.g. torque, etc).
     typedef VectorXs TangentVectorType;
 
+    // =========================================================================
+    // 三套维度。因为位形空间是弯曲流形而速度住在切空间，三者一般互不相等：
+    //   nq         位形向量 q 的长度      —— 求解器的"状态"
+    //   nv         切空间 v 的维数        —— M / tau / qdot 的维数
+    //   nvExtended 雅可比列数            —— 展开 mimic 后的维数
+    // 无 mimic 关节时 nv == nvExtended。详见下方 idx_* / n*s 索引表的说明。
+    // =========================================================================
+
     /// \brief Dimension of the configuration vector representation.
-    int nq;
+    int nq; // 位形空间维数：球副占 4（四元数）、浮动基占 7，故可能 > nv
 
     /// \brief Dimension of the velocity vector space.
-    int nv;
+    int nv; // 独立自由度个数：广义速度/加速度/力矩的维数
 
     /// \brief Dimension of the jacobian space.
-    int nvExtended;
+    int nvExtended; // 雅可比列空间维数：mimic 关节虽不占 nv 但仍占一列，故可能 > nv
 
     /// \brief Number of joints.
-    int njoints;
+    int njoints; // 关节数，含下标 0 的 universe，故最少为 1
 
     /// \brief Number of bodies.
-    int nbodies;
+    int nbodies; // 刚体数（同样含 universe）
 
     /// \brief Number of operational frames.
-    int nframes;
+    int nframes; // 操作坐标系数量，等于 frames.size()
+
+    // ---- 以下所有 std::vector 均以 JointIndex 为下标，第 0 项恒为 universe ----
 
     /// \brief Vector of spatial inertias supported by each joint.
-    InertiaVector inertias;
+    InertiaVector inertias; // inertias[i]：关节 i 所承载刚体的空间惯量（在关节系下表达）
 
     /// \brief Vector of joint placements: placement of a joint *i* wrt its parent joint frame.
-    SE3Vector jointPlacements;
+    SE3Vector jointPlacements; // jointPlacements[i]：关节 i 相对父关节系的固定安装位姿 ^{li}M_i
 
     /// \brief Vector of joint models.
-    JointModelVector joints;
+    JointModelVector joints; // joints[i]：关节 i 的模型（variant，内含 nq/nv/idx_q/idx_v 等）
+
+    // ---- q / v / 雅可比 三套「关节 → 全局向量切片」查找表 ----
+    // 用法：q 里属于关节 i 的那一段是 q.segment(idx_qs[i], nqs[i])。
+    // 实际代码中不要手写 segment，用 jmodel.jointConfigSelector(q) /
+    // jointVelocitySelector(v)，它们内部就是这两组下标。
+    // 建表方式见 addJoint：idx_qs[i] = sum_{k<i} nqs[k]（前缀和），
+    // 因为 parents[i] < i，所以下标天然按拓扑序递增。
 
     /// \brief Vector of starting index of the *i*th  joint in the configuration space.
-    std::vector<int> idx_qs;
+    std::vector<int> idx_qs; // 关节 i 在 q 中的起始下标
 
     /// \brief Vector of dimension of the  joint configuration subspace.
-    std::vector<int> nqs;
+    std::vector<int> nqs; // 关节 i 在 q 中占的维数（仅自己，不含子树）
 
     /// \brief Starting index of the *i*th joint in the tangent configuration space.
-    std::vector<int> idx_vs;
+    std::vector<int> idx_vs; // 关节 i 在 v 中的起始下标（M / tau / J 的行列均按此排布）
 
     /// \brief Dimension of the *i*th joint tangent subspace.
-    std::vector<int> nvs;
+    std::vector<int> nvs; // 关节 i 在 v 中占的维数
 
     /// \brief Starting index of the *i*th joint in the jacobian space.
-    std::vector<int> idx_vExtendeds;
+    std::vector<int> idx_vExtendeds; // 关节 i 在 data.J 中的起始列（mimic 关节独占一列）
 
     /// \brief Dimension of the *i*th joint jacobian subspace.
-    std::vector<int> nvExtendeds;
+    std::vector<int> nvExtendeds; // 关节 i 在 data.J 中占的列数
+
+    // ---- 树的拓扑结构 ----
 
     /// \brief Vector of parent joint indexes. The parent of joint *i*, denoted *li*, corresponds to
     /// li==parents[i].
-    std::vector<JointIndex> parents;
+    std::vector<JointIndex> parents; // parents[i]：关节 i 的父关节。恒有 parents[i] < i，
+                                     // 这是反向递推（RNEA/CRBA 的 backward pass）能倒序
+                                     // 遍历 i = njoints-1 ... 1 的前提
 
     /// \brief Vector of children index. Chidren of the *i*th joint, denoted *mu(i)* corresponds to
     /// the set (i==parents[k] for k in mu(i)).
-    std::vector<IndexVector> children;
+    std::vector<IndexVector> children; // children[i]：关节 i 的全部直接子关节（parents 的逆映射）
 
     /// \brief Vector of mimicking joints in the tree (with type MimicTpl)
-    std::vector<JointIndex> mimicking_joints;
+    std::vector<JointIndex> mimicking_joints; // 所有 mimic（从动）关节的 id
 
     /// \brief Vector of mimicked joints in the tree (can be any joint type)
     /// The i-th element of this vector correspond to the mimicked joint of the i-th mimicking
     /// vector in mimicking_joints
-    std::vector<JointIndex> mimicked_joints;
+    std::vector<JointIndex> mimicked_joints; // 与上表按下标一一对应的被模仿（主动）关节 id
 
     /// \brief Name of the joints.
-    std::vector<std::string> names;
+    std::vector<std::string> names; // names[i]：关节名，names[0] == "universe"
 
     /// \brief Map of reference configurations, indexed by user given names.
-    ConfigVectorMap referenceConfigurations;
+    ConfigVectorMap referenceConfigurations; // 具名参考位形（如 URDF/SRDF 里的 "half_sitting"）
+
+    // ---- 电机/传动相关的动力学参数，长度均为 nv，按 idx_v 排布 ----
 
     /// \brief Vector of armature values expressed at the joint level
     /// This vector may contain the contribution of rotor inertia effects for instance.
-    VectorXs armature;
+    VectorXs armature; // 电枢惯量：直接加到 M 的对角线上（M.diagonal() += armature），
+                       // 用于补偿减速器折算后的转子惯量，也能改善 M 的条件数
 
     /// \brief Vector of rotor inertia parameters
-    TangentVectorType rotorInertia;
+    TangentVectorType rotorInertia; // 转子自身惯量 I_r（未经减速比折算的原始值）
 
     /// \brief Vector of rotor gear ratio parameters
-    TangentVectorType rotorGearRatio;
+    TangentVectorType rotorGearRatio; // 减速比 r，与上者合成 armature = r^2 * I_r
 
     /// \brief Vector of joint friction parameters
     /// Deprecated in favor of lowerDryFrictionLimit and upperDryFrictionLimit
-    PINOCCHIO_DEPRECATED TangentVectorType & friction;
+    PINOCCHIO_DEPRECATED TangentVectorType & friction; // 已弃用：是 upperDryFrictionLimit 的引用
 
     /// \brief Vector of joint friction parameters
-    TangentVectorType lowerDryFrictionLimit;
+    TangentVectorType lowerDryFrictionLimit; // 库仑（干）摩擦力矩下界，通常为负
 
     /// \brief Vector of joint friction parameters
-    TangentVectorType upperDryFrictionLimit;
+    TangentVectorType upperDryFrictionLimit; // 库仑（干）摩擦力矩上界
 
     /// \brief Vector of joint damping parameters
-    TangentVectorType damping;
+    TangentVectorType damping; // 粘滞阻尼系数 b：阻尼力矩 = -b * v，与速度成正比
+
+    // ---- 限位。effort/velocity/friction 长度为 nv；position 长度为 nq ----
 
     /// \brief Vector of minimal joint torques
-    TangentVectorType lowerEffortLimit;
+    TangentVectorType lowerEffortLimit; // 关节力矩下界
 
     /// \brief Vector of maximal joint torques
-    TangentVectorType upperEffortLimit;
+    TangentVectorType upperEffortLimit; // 关节力矩上界
 
     /// \brief Vector of maximal joint torques
     /// Deprecated in favor of lowerEffortLimit and upperEffortLimit
-    PINOCCHIO_DEPRECATED TangentVectorType & effortLimit;
+    PINOCCHIO_DEPRECATED TangentVectorType & effortLimit; // 已弃用：upperEffortLimit 的引用
 
     /// \brief Vector of minimal joint velocities
-    TangentVectorType lowerVelocityLimit;
+    TangentVectorType lowerVelocityLimit; // 关节速度下界
 
     /// \brief Vector of maximal joint velocities
-    TangentVectorType upperVelocityLimit;
+    TangentVectorType upperVelocityLimit; // 关节速度上界
 
     /// \brief Vector of maximal joint velocities
     /// Deprecated in favor of lowerVelocityLimit and upperVelocityLimit
-    PINOCCHIO_DEPRECATED TangentVectorType & velocityLimit;
+    PINOCCHIO_DEPRECATED TangentVectorType & velocityLimit; // 已弃用：upperVelocityLimit 的引用
 
     /// \brief Lower joint configuration limit
-    ConfigVectorType lowerPositionLimit;
+    ConfigVectorType lowerPositionLimit; // 位形下界，长度 nq，按 idx_q 排布（注意不是 nv！）
 
     /// \brief Upper joint configuration limit
-    ConfigVectorType upperPositionLimit;
+    ConfigVectorType upperPositionLimit; // 位形上界，长度 nq
+                                         // 无界维度（SO(2)/SO(3) 的分量）填 ±inf，
+                                         // 可用 hasConfigurationLimit() 判断哪些维度有意义
 
     /// \brief Joint configuration limit margin
-    ConfigVectorType positionLimitMargin;
+    ConfigVectorType positionLimitMargin; // 位形限位的安全裕度，长度 nq；
+                                          // 碰撞/规划时把可行域再向内收缩这么多
 
     /// \brief Vector of operational frames registered on the model.
-    FrameVector frames;
+    FrameVector frames; // 所有操作坐标系（末端、传感器、固定关节折叠后的残留等）。
+                        // 坐标系不是自由度，只是挂在某个关节上的固定偏移：oMf = oMi * placement
+
+    // ---- 预计算的树遍历结果：把 O(n) 的路径搜索变成 O(1) 查表 ----
 
     /// \brief Vector of joint supports.
     /// supports[j] corresponds to the vector of indices of the joints located on the path between
     /// joint *j*  and "universe".
     /// The first element of supports[j] is "universe", the last one is the index of joint *j*
     /// itself.
-    std::vector<IndexVector> supports;
+    std::vector<IndexVector> supports; // 支撑链：从 universe 到关节 j 的完整路径（含首尾）。
+                                       // 关节 j 的雅可比只有这条链上的列非零
 
     /// \brief Vector of mimic supports joints.
     /// mimic_joint_supports[j] corresponds to the vector of mimic joints indices located on the
     /// path between joint *j*  and "universe". The first element of mimic_joint_supports[j] is
     /// "universe". If *j* is a mimic, the last element is the index of joint *j* itself.
-    std::vector<IndexVector> mimic_joint_supports;
+    std::vector<IndexVector> mimic_joint_supports; // supports[j] 中只保留 mimic 关节的子序列，
+                                                   // 用于雅可比折叠时的第二趟累加
 
     /// \brief Vector of joint subtrees.
     /// subtree[j] corresponds to the subtree supported by the joint *j*.
     /// The first element of subtree[j] is the index of the joint *j* itself.
-    std::vector<IndexVector> subtrees;
+    std::vector<IndexVector> subtrees; // 子树：以关节 j 为根的全部后代（含 j 自己）。
+                                       // CRBA 用它确定复合刚体惯量要累加哪些刚体
 
     /// \brief Sparsity pattern for each joint.
     /// sparsity_pattern_vector[i] is a boolean vector of size nv indicating which columns
     /// of the Jacobian are nonzero for joint i.
-    VectorOfBooleanVector sparsity_pattern_vector;
+    VectorOfBooleanVector sparsity_pattern_vector; // 稠密布尔掩码版：适合做按位与/或
 
     /// \brief Colwise span indexes for each joints.
     /// span_indexes_vector[i] lists the column indexes of nonzero entries for joint i.
-    VectorOfEigenIndexVector span_indexes_vector;
+    VectorOfEigenIndexVector span_indexes_vector; // 同一信息的下标列表版：适合直接遍历非零列
 
     /// \brief Spatial gravity of the model.
-    Motion gravity;
+    Motion gravity; // 重力的空间加速度表示（linear = g，angular = 0）。
+                    // RNEA 通过把基座加速度初始化为 -gravity 来"免费"算出重力项
 
     /// \brief Default 3D gravity vector (=(0,0,-9.81)).
-    static const Vector3 gravity981;
+    static const Vector3 gravity981; // 默认重力向量 (0,0,-9.81)，定义在本文件末尾
 
     /// \brief Model name.
-    std::string name;
+    std::string name; // 模型名（一般取自 URDF 的 <robot name="...">）
 
     /// \brief Default constructor. Builds an empty model with no joints.
+    // 默认构造：建出一棵「只有 universe 的空树」。
+    // 所有以 JointIndex 为下标的容器都被初始化成长度 1、内容为零/单位元的状态，
+    // 这就是"下标 0 恒为 universe"这条全局约定的源头；真实关节从 1 开始编号。
+    // 三个 PINOCCHIO_DEPRECATED 引用成员（friction/effortLimit/velocityLimit）
+    // 必须在初始化列表里绑定，故此处用 DIAGNOSTIC_PUSH/POP 抑制弃用告警。
     PINOCCHIO_COMPILER_DIAGNOSTIC_PUSH
     PINOCCHIO_COMPILER_DIAGNOSTIC_IGNORED_DEPRECECATED_DECLARATIONS
     ModelTpl()
-    : nq(0)
+    : nq(0)          // 空树没有自由度
     , nv(0)
     , nvExtended(0)
-    , njoints(1)
+    , njoints(1)     // 但已经有一个"关节"：universe
     , nbodies(1)
-    , nframes(0)
+    , nframes(0)     // frames 在函数体里通过 addFrame 补上，故这里是 0
     , inertias(1, Inertia::Zero())
     , jointPlacements(1, SE3::Identity())
     , joints(1)
-    , idx_qs(1, 0)
+    , idx_qs(1, 0)   // universe 不占 q/v/雅可比的任何一维，六张索引表全填 0
     , nqs(1, 0)
     , idx_vs(1, 0)
     , nvs(1, 0)
     , idx_vExtendeds(1, 0)
     , nvExtendeds(1, 0)
-    , parents(1, 0)
+    , parents(1, 0)  // universe 的父亲是它自己，用于终止向上遍历
     , children(1)
     , names(1)
-    , friction(upperDryFrictionLimit)
+    , friction(upperDryFrictionLimit)   // 三个弃用名只是新名字的别名，不占额外存储
     , effortLimit(upperEffortLimit)
     , velocityLimit(upperVelocityLimit)
-    , supports(1, IndexVector(1, 0))
+    , supports(1, IndexVector(1, 0))            // universe 的支撑链就是它自己
     , mimic_joint_supports(1, IndexVector(1, 0))
     , subtrees(1)
     , sparsity_pattern_vector(1)
     , span_indexes_vector(1)
-    , gravity(gravity981, Vector3::Zero())
+    , gravity(gravity981, Vector3::Zero())      // 线速度部分 = (0,0,-9.81)，角速度部分 = 0
     {
       names[0] = "universe"; // Should be "universe joint (trivial)"
       // FIXME Should the universe joint be a FIXED_JOINT even if it is
@@ -292,6 +349,8 @@ namespace pinocchio
     ///
     /// \param[in] other model to copy to *this
     ///
+    // 换标量类型的拷贝构造：double 模型 -> float / CppAD::AD<double> 等。
+    // 自动微分场景常用（把整个模型提升为 AD 类型后再求导）。
     PINOCCHIO_COMPILER_DIAGNOSTIC_PUSH
     PINOCCHIO_COMPILER_DIAGNOSTIC_IGNORED_DEPRECECATED_DECLARATIONS
     template<typename S2, int O2>
@@ -309,6 +368,8 @@ namespace pinocchio
     ///
     /// \param[in] other model to copy to *this
     ///
+    // 换关节集合的拷贝构造：标量不变，但目标 JointCollection 可能包含
+    // 自定义关节类型。用于扩展了关节"菜单"之后在两种 Model 之间转换。
     PINOCCHIO_COMPILER_DIAGNOSTIC_PUSH
     PINOCCHIO_COMPILER_DIAGNOSTIC_IGNORED_DEPRECECATED_DECLARATIONS
     template<template<typename, int> class OtherJointCollectionTpl>
@@ -326,6 +387,8 @@ namespace pinocchio
     ///
     /// \param[in] other model to copy to *this
     ///
+    // 普通拷贝构造。之所以不能用编译器生成的版本，是因为那三个引用成员
+    // 必须重新绑定到「本对象」的向量上，否则会悬垂到源对象去。
     PINOCCHIO_COMPILER_DIAGNOSTIC_PUSH
     PINOCCHIO_COMPILER_DIAGNOSTIC_IGNORED_DEPRECECATED_DECLARATIONS
     ModelTpl(const ModelTpl & other)
@@ -338,6 +401,9 @@ namespace pinocchio
     PINOCCHIO_COMPILER_DIAGNOSTIC_POP
 
     /// \returns A new copy of *this with the Scalar type casted to NewScalar.
+    // 标量类型转换：返回一份把所有数值成员都转成 NewScalar 的新模型。
+    // 返回类型由文件开头的 CastType 特化给出。典型用途：
+    //   Model 转 ModelTpl<CppAD::AD<double>>，再对整条动力学链求解析导数。
     template<typename NewScalar>
     typename CastType<NewScalar, ModelTpl>::type cast() const;
 
@@ -346,12 +412,15 @@ namespace pinocchio
     ///
     /// \returns true if *this is equal to other.
     ///
+    // 逐字段深比较（维度 / 拓扑 / 惯量 / 限位 / 关节模型全都要一致）。
+    // 常用于校验"手工搭的模型"与"URDF 解析出的模型"是否等价。
     bool operator==(const ModelTpl & other) const;
 
     ///
     /// \brief Assignment operator from another collection.
     ///
     ///
+    // 跨 JointCollection 赋值。真正的实现在这一版里，下面的同类型版本转调它。
     template<template<typename, int> class OtherJointCollectionTpl>
     ModelTpl & operator=(const ModelTpl<Scalar, Options, OtherJointCollectionTpl> & other);
 
@@ -359,6 +428,8 @@ namespace pinocchio
     /// \brief Assignment operator.
     ///
     ///
+    // 同类型赋值：显式指定模板实参转调上面那个版本。
+    // 同样不能用编译器默认版本——引用成员不可重新赋值。
     ModelTpl & operator=(const ModelTpl & other)
     {
       (*this).template operator= <JointCollectionTpl>(other);
@@ -373,6 +444,24 @@ namespace pinocchio
       return !(*this == other);
     }
 
+    // =========================================================================
+    // addJoint 重载家族（共 6 个）。它是唯一能改变树拓扑的入口，职责是：
+    //   1. 分配新的 joint_id = njoints++；
+    //   2. 调 jmodel.setIndexes(id, nq, nv, nvExtended) —— 传入的是「累加之前」
+    //      的总维数，于是它天然就是本关节的 idx_q/idx_v/idx_vExtended（前缀和）；
+    //   3. 累加 nq/nv/nvExtended，并向六张索引表 push_back；
+    //   4. resize 所有限位/摩擦/阻尼向量并写入本关节那一段；
+    //   5. 维护 parents/children/subtrees/supports/稀疏模式。
+    //
+    // 【重要约束】必须按深度优先顺序添加，保证 parents[i] < i，
+    //            否则反向递推与稀疏 Cholesky 的假设全部失效。
+    // 【注意】它不会自动建同名 Frame，需要的话另外调 addJointFrame。
+    //
+    // 下面各重载只是参数丰俭不同，最终都转调「参数最全」的那一个：
+    //   (min/max effort, min/max velocity, min/max config, config_limit_margin,
+    //    min/max friction, damping)
+    // =========================================================================
+
     ///
     /// \brief Add a joint to the kinematic tree with infinite bounds.
     ///
@@ -381,6 +470,7 @@ namespace pinocchio
     /// \remarks The inertia supported by the joint is set to Zero.
     /// \remark Joints need to be added to the tree in a depth-first order.
     ///
+    // 最简版本：不给任何限位，全部取 ±inf；惯量置零（之后用 appendBodyToJoint 补）。
     /// \tparam JointModelDerived The type of the joint model.
     ///
     /// \param[in] parent Index of the parent joint.
@@ -408,6 +498,8 @@ namespace pinocchio
     /// \param[in] min_config Lower joint configuration.
     /// \param[in] max_config Upper joint configuration.
     ///
+    // 对称限位版（已弃用）：只给上界，下界自动取 -max_*。
+    // 注意 effort/velocity 长度为 nv，而 min_config/max_config 长度为 nq。
     JointIndex addJoint(
       const JointIndex parent,
       const JointModel & joint_model,
@@ -429,6 +521,7 @@ namespace pinocchio
     /// \param[in] max_config Upper joint configuration.
     /// \param[in] config_limit_margin Joint configuration limit margin.
     ///
+    // 同上，额外指定位形限位的安全裕度（已弃用）。
     JointIndex addJoint(
       const JointIndex parent,
       const JointModel & joint_model,
@@ -451,6 +544,8 @@ namespace pinocchio
     /// \param[in] max_friction Maximal joint friction parameters.
     /// \param[in] damping Joint damping parameters.
     ///
+    // 非对称限位版（已弃用）：上下界独立给出，并带摩擦/阻尼。
+    // 实现里把 config_limit_margin 补零后转调最全的那一版。
     JointIndex addJoint(
       const JointIndex parent,
       const JointModel & joint_model,
@@ -478,6 +573,7 @@ namespace pinocchio
     /// \param[in] max_friction Maximal joint friction parameters.
     /// \param[in] damping Joint damping parameters.
     ///
+    // ★ 参数最全的版本：其余 5 个重载最终都收敛到这里，真正干活的实现。
     JointIndex addJoint(
       const JointIndex parent,
       const JointModel & joint_model,
@@ -502,6 +598,7 @@ namespace pinocchio
     /// \param[in] friction Joint friction parameters.
     /// \param[in] damping Joint damping parameters.
     ///
+    // 对称限位 + 对称摩擦 + 裕度：friction 同时作为上下界（取 ±friction）。
     JointIndex addJoint(
       const JointIndex parent,
       const JointModel & joint_model,
@@ -522,6 +619,7 @@ namespace pinocchio
     /// \param[in] friction Joint friction parameters.
     /// \param[in] damping Joint damping parameters.
     ///
+    // 同上但不给裕度（内部补零）。URDF 解析器最常走这一条。
     JointIndex addJoint(
       const JointIndex parent,
       const JointModel & joint_model,
@@ -543,6 +641,8 @@ namespace pinocchio
     ///
     /// \return The index of the new frame
     ///
+    // 给已存在的关节补一个 JOINT 类型的 Frame，使它能按名字被 getFrameId 找到。
+    // addJoint 刻意不做这件事，所以建模流程通常是 addJoint 之后紧跟本函数。
     FrameIndex addJointFrame(const JointIndex joint_index, int previous_frame_index = -1);
 
     ///
@@ -555,6 +655,10 @@ namespace pinocchio
     ///
     /// \sa Model::addJoint
     ///
+    // 给关节挂上刚体质量属性：把 Y 经 body_placement 变换到关节系后
+    // 【累加】到 inertias[joint_index] 上（是 +=，不是覆盖）。
+    // 因此同一关节可以挂多个刚体，等价于把它们复合成一个等效刚体——
+    // 这正是 URDF 里"固定关节被折叠"后惯量合并的实现方式。
     void appendBodyToJoint(
       const JointIndex joint_index,
       const Inertia & Y,
@@ -572,11 +676,18 @@ namespace pinocchio
     ///
     /// \return The index of the new frame
     ///
+    // 注册一个 BODY 类型的 Frame（纯几何标记，不携带质量、不产生自由度）。
+    // 与 appendBodyToJoint 的区别：那个改惯量，这个只加一个可查询的坐标系。
     FrameIndex addBodyFrame(
       const std::string & body_name,
       const JointIndex & parentJoint,
       const SE3 & body_placement = SE3::Identity(),
       int parentFrame = -1);
+
+    // ---- 名字 → 下标 的查询接口 ----
+    // 【共同陷阱】找不到时不抛异常，而是返回"容器当前长度"这个越界哨兵值。
+    // 因此结果必须先用对应的 exist* 校验，或至少与 nframes/njoints 比一比，
+    // 否则一旦之后又往模型里加了元素，这个哨兵值就会静默变成合法下标。
 
     ///
     /// \brief Return the index of a body given by its name.
@@ -589,6 +700,7 @@ namespace pinocchio
     ///
     /// \return Index of the body.
     ///
+    // 注意返回的是 FrameIndex（frames 里的下标），不是 JointIndex。
     FrameIndex getBodyId(const std::string & name) const;
 
     ///
@@ -610,6 +722,7 @@ namespace pinocchio
     ///
     /// \return Index of the joint.
     ///
+    // 关节名 → JointIndex，可直接用于 data.oMi[id] 等按关节下标的容器。
     JointIndex getJointId(const std::string & name) const;
 
     ///
@@ -634,6 +747,9 @@ namespace pinocchio
     ///
     /// \return Index of the frame.
     ///
+    // type 是【位掩码】而非单一枚举值，默认匹配全部五种类型。
+    // 同名但不同类型的 Frame 可以共存（例如关节名与连杆名相同时），
+    // 此时必须显式传 type 才能选中想要的那一个。
     FrameIndex getFrameId(
       const std::string & name,
       const FrameType & type = (FrameType)(JOINT | FIXED_JOINT | BODY | OP_FRAME | SENSOR)) const;
@@ -662,6 +778,9 @@ namespace pinocchio
     /// \return Returns the index of the frame if it has been successfully added or if it already
     /// exists in the kinematic tree.
     ///
+    // 添加坐标系，并可选地把 frame 自带的惯量并入其父关节（append_inertia=true）。
+    // 幂等：同名同类型已存在时直接返回原下标，不会重复插入。
+    // Frame 不增加自由度，只是"挂在某关节上的固定偏移"，因此加多少个都不影响 nq/nv。
     FrameIndex addFrame(const Frame & frame, const bool append_inertia = true);
 
     ///
@@ -674,6 +793,8 @@ namespace pinocchio
     ///
     /// \return true if the Model is valid, false otherwise.
     ///
+    // 模板化的自检入口：具体的校验规则由各算法模块提供的 checker 定义
+    // （如 ABA 要求父下标递增、CRBA 要求子树连续等），实现了"算法自带前置条件"。
     template<typename D>
     bool check(const AlgorithmCheckerBase<D> & checker) const
     {
@@ -685,6 +806,10 @@ namespace pinocchio
     ///
     /// \return Returns list of boolean of size model.nq.
     ///
+    // 逐维回答"这一维在位形空间里有没有上下界"，长度 nq，与 lowerPositionLimit 对齐。
+    // false 表示该维住在紧致无边流形上（SO(2)/SO(3)），限位这个概念根本没定义，
+    // 而不是"暂时没设置"。它是关节【类型】决定的静态属性，与实际填的数值无关，
+    // 因此判断可行域时还需再叠加一次 isfinite 检查。
     std::vector<bool> hasConfigurationLimit() const;
 
     ///
@@ -692,9 +817,13 @@ namespace pinocchio
     ///
     /// \return Returns list of boolean of size model.nq.
     ///
+    // 同上的切空间版本，长度为【nv】而非 nq（上方 doxygen 注释写成 nq 是笔误）。
+    // 差别只出现在 nq != nv 的关节上：FreeFlyer 在 q 里给出 7 项、在 v 里给出 6 项。
+    // 做 IK/轨迹优化时决策变量是切空间增量，必须用这个版本才能与下标对齐。
     std::vector<bool> hasConfigurationLimitInTangent() const;
 
     /// Run check(fusion::list) with DEFAULT_CHECKERS as argument.
+    // 用默认检查器集合做一次自检。
     bool check() const;
 
     ///
@@ -704,15 +833,21 @@ namespace pinocchio
     ///
     /// \return true if the data is valid, false otherwise.
     ///
+    // 校验一个 Data 是否与本 Model 匹配（各容器尺寸是否符合 nq/nv/njoints）。
+    // 算法入口处普遍有 assert(model.check(data))，防止误用别的模型建出的 Data。
     bool check(const Data & data) const;
 
     ///
     /// \brief Create a Data structure associated with the current model
     ///
+    // 工厂方法：按当前模型的维度分配好全部工作区。建模完成后调用一次即可，
+    // 之后反复复用同一个 Data 跑算法（实时循环里绝不要每帧新建）。
+    // 多线程时应为每个线程各建一份 Data，Model 则可只读共享。
     Data createData() const;
 
     /// Returns a vector of the children joints of the kinematic tree.
     /// \remark: a child joint is a node without any child joint.
+    // 返回所有【叶子】关节（children 为空的节点），即各条运动链的末端。
     std::vector<JointIndex> getChildJoints() const;
 
   protected:
@@ -721,6 +856,8 @@ namespace pinocchio
     ///
     /// \param[in] joint_id The id of the joint to add to the subtrees
     ///
+    // addJoint 的内部辅助：沿 parents 一路上溯到 universe，
+    // 把新关节的 id 追加进沿途每个祖先的 subtrees 里，从而增量维护子树表。
     void addJointIndexToParentSubtrees(const JointIndex joint_id);
   };
 
@@ -753,6 +890,7 @@ namespace pinocchio
     };
   } // namespace details
 
+  // 静态变量类内声明，类外定义。默认重力向量 = (0,0,-9.81)。
   template<typename Scalar, int Options, template<typename, int> class JointCollectionTpl>
   const typename ModelTpl<Scalar, Options, JointCollectionTpl>::Vector3
     ModelTpl<Scalar, Options, JointCollectionTpl>::gravity981((Scalar)0, (Scalar)0, (Scalar)-9.81);
@@ -827,13 +965,33 @@ namespace pinocchio
     // ============================================================
 
     // —— 阶段①：一致性断言 + 入参尺寸/范围校验 ——
+    //
+    // 【为什么全部校验都堆在最前面】
+    // 后面阶段②~⑩ 会向十几个并行容器 push_back，中途抛异常会留下一棵半更新的树
+    // （njoints 与各容器长度错位），而且没有任何回滚机制。所以这里是"要么全做、
+    // 要么不做"的守门人：先把能查的错一次查完，之后的写入过程不再有失败路径。
+    //
+    // 【两种检查性质完全不同，不要混为一谈】
+    //   assert(...)            受 NDEBUG 控制，Release 里整条编译掉（零开销）。
+    //                          只断言【库自身的内部不变量】；触发 = Pinocchio 的 bug
+    //                          或用户直接篡改了公开字段，不属于正常的输入错误。
+    //   PINOCCHIO_CHECK_*(...) 只受 PINOCCHIO_NO_THROW 控制，【Release 下照样生效】，
+    //                          失败抛 std::invalid_argument（见 macros.hxx:188-226）。
+    //                          校验【用户入参】，是公开 API 契约的一部分。
+    //                          addJoint 只在建模期调用，这点开销无所谓。
+
+    // (a) 内部不变量：所有以 JointIndex 为下标的并行数组必须始终等长。
+    //     它们在阶段④成组 push_back，长度一旦错位，后续所有按 id 的索引都会读错。
     // 四个并行数组长度必须都等于 njoints（不变量：它们始终同步增长）。
     assert(
       (njoints == (int)joints.size()) && (njoints == (int)inertias.size())
       && (njoints == (int)parents.size()) && (njoints == (int)jointPlacements.size()));
+    // (b) 关节自报的三个维度不能为负（防御自定义关节类型把 traits 写错）。
     assert((joint_model.nq() >= 0) && (joint_model.nv() >= 0) && (joint_model.nvExtended() >= 0));
     assert(joint_model.nq() >= joint_model.nv()); // 位形维 ≥ 速度维（弯流形关节 nq>nv）
 
+    // (c) 尺寸校验之一：所有【切空间量】长度必须等于 joint_model.nv()。
+    //     力矩、速度、干摩擦都是作用在广义速度上的量，故按 nv 计。
     PINOCCHIO_CHECK_ARGUMENT_SIZE(
       min_effort.size(), joint_model.nv(), "The joint minimal effort vector is not of right size");
     PINOCCHIO_CHECK_ARGUMENT_SIZE(
@@ -850,6 +1008,10 @@ namespace pinocchio
     PINOCCHIO_CHECK_ARGUMENT_SIZE(
       max_velocity.size(), joint_model.nv(),
       "The joint maximum velocity vector is not of right size");
+
+    // (d) 区间合法性：逐分量要求 min <= max，否则可行域为空集，
+    //     后续 randomConfiguration / 规划器会静默给出无意义结果而不是报错。
+    //     compareAll(..., LE) 是"全部分量都满足"的归约，不是任意一个满足即可。
     PINOCCHIO_CHECK_INPUT_ARGUMENT(
       compareAll(min_effort, max_effort, internal::ComparisonOperators::LE),
       "Some components of min_effort are greater than max_effort");
@@ -859,6 +1021,11 @@ namespace pinocchio
     PINOCCHIO_CHECK_INPUT_ARGUMENT(
       compareAll(min_velocity, max_velocity, internal::ComparisonOperators::LE),
       "Some components of min_velocity are greater than max_velocity");
+
+    // (e) 尺寸校验之二：所有【位形量】长度必须等于 joint_model.nq()，而不是 nv！
+    //     这是本函数最容易踩的地方——同一个关节，effort 传 nv 维、config 传 nq 维。
+    //     以 FreeFlyer 为例：min_effort 是 6 维，min_config 却是 7 维。
+    //     两者搞反时不会静默出错，正是靠这几行抛异常挡住。
     PINOCCHIO_CHECK_ARGUMENT_SIZE(
       min_config.size(), joint_model.nq(),
       "The joint lower configuration bound is not of right size");
@@ -868,8 +1035,15 @@ namespace pinocchio
     PINOCCHIO_CHECK_ARGUMENT_SIZE(
       config_limit_margin.size(), joint_model.nq(),
       "The joint config limit margin is not of right size");
+    // 注意 damping 又回到 nv（它乘的是速度），别被上面三行带偏。
     PINOCCHIO_CHECK_ARGUMENT_SIZE(
       joint_damping.size(), joint_model.nv(), "The joint damping vector is not of right size");
+
+    // (f) 拓扑合法性：父关节必须是【已经存在】的节点。
+    //     新关节拿到的 id 就是当前 njoints，所以这条等价于 parent < 新 id，
+    //     从而保证 parents[i] < i ——反向递推（RNEA/CRBA 倒序遍历）与稀疏 Cholesky
+    //     都依赖这个不变量。这也是"必须按深度优先添加"的强制点。
+    //     JointIndex 是无符号类型，故不必再检查 parent >= 0。
     PINOCCHIO_CHECK_INPUT_ARGUMENT(
       parent < (JointIndex)njoints, "The index of the parent joint is not valid.");
 
