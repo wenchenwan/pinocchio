@@ -185,7 +185,7 @@ struct ModelTpl
 | 字段 | 维度 | 含义 |
 |---|---|---|
 | `lowerPositionLimit` / `upperPositionLimit` | `nq` | 位置限位。`randomConfiguration` 在此范围采样 |
-| `positionLimitMargin` | `nq` | 位置限位的安全裕度 |
+| `positionLimitMargin` | `nq` | 位置限位的**提前激活缓冲带**（详见下方专栏，⚠️ 仅正向动力学用） |
 | `lowerVelocityLimit` / `upperVelocityLimit` | `nv` | 速度限位 |
 | `lowerEffortLimit` / `upperEffortLimit` | `nv` | 力矩限位 |
 | `lowerDryFrictionLimit` / `upperDryFrictionLimit` | `nv` | 库仑（干）摩擦上下限 |
@@ -198,6 +198,40 @@ struct ModelTpl
 
 > **`armature` 的实际意义**：谐波减速器的转子折算到关节侧的惯量为 $n^2 I_{\text{rotor}}$（$n$ 为减速比），
 > 对高减速比关节这一项可能与连杆惯量同量级。忽略它会让模型显著偏软。
+
+#### 2.3.1 专栏：`positionLimitMargin` 是什么、只在正向动力学用
+
+> ⚠️ **备注：此字段只在正向动力学（约束/接触前向动力学，即仿真）中使用；逆动力学（RNEA）用不到。后续读到"约束前向动力学"算法时再回看本节。**
+
+**它是什么**：`nq` 维向量，每个配置坐标一个值，是关节限位约束的**提前激活缓冲带**——决定关节离限位还有多远时，就把限位约束**提前打开**。由 `addJoint` 写入，**默认 0**。消费者是 [`constraints/joint-limit-constraint.hxx`](../include/pinocchio/src/constraints/joint-limit-constraint.hxx) 的 `JointLimitConstraintModel`，激活判据：
+
+$$\text{下限激活：}\ q_i-\text{lower}_i\le \text{margin}_i,\qquad \text{上限激活：}\ \text{upper}_i-q_i\le \text{margin}_i$$
+
+**为什么只属于正向动力学**：
+
+| | 输入→输出 | 限位有没有用 |
+|---|---|---|
+| 逆动力学 RNEA | $(q,v,a)\to\tau$ | ❌ 运动已给定，只反算力矩，不需要"阻止越界" |
+| 正向动力学（约束） | $(q,v,\tau)\to a$ | ✅ 运动未知；若 $\tau$ 会把关节推过限位，需**约束力**顶住 |
+
+关节限位是**单边（不等式）约束**（像一堵"墙"：没到墙边约束不存在，接近/触墙才产生约束力）。"要不要产生约束力"只有在**解算运动**（正向动力学）时才有意义，故 margin 只出现在约束前向动力学 / 仿真里。
+
+**典型用法（仿真主循环）**：
+
+```cpp
+model.positionLimitMargin = VectorXd::Constant(model.nq, 0.05);   // 设 0.05 缓冲带
+JointLimitConstraintModel limit_cm(model, activable_joints);      // 读入 lower/upper/margin
+auto limit_cd = limit_cm.createData();
+
+for (每个仿真步) {
+  tau = controller(q, v);
+  limit_cm.makeSelectionFilteredByLimitProximity(q);  // ★ 按 margin 选出接近限位的关节进激活集
+  a   = 约束前向动力学(model, data, q, v, tau, limit_cm, limit_cd); // 激活约束产生约束力顶住边界
+  v  += a*dt;  q = integrate(model, q, v*dt);
+}
+```
+
+**margin 的直观效果**：`margin=0` → 到限位才激活，一步可能冲过再弹回（抖动/穿透）；`margin>0` → 到墙之前提前介入、平滑减速停在边界内。它是可调的**安全提前量**（每坐标独立）。约束动力学的 `Data` 字段见 [§3.8](#38-辨识回归量与约束动力学)。
 
 **⑤ mimic（耦合关节）**
 
@@ -383,6 +417,7 @@ njoints++  →  joints.push_back(...)  →  jmodel.setIndexes(id, nq, nv, nvExte
 ### 3.8 辨识回归量与约束动力学
 - `staticRegressor`/`bodyRegressor`/`jointTorqueRegressor`：惯量辨识回归矩阵（见 [空间代数解析 §6.10](空间代数运算解析.md)）。
 - `JMinvJt`/`lambda_c`/`impulse_c`/`osim`（操作空间惯量逆）/`KA`/`LA`/`lA`：约束/接触动力学（见 [floating-base-and-contact-dynamics.md](floating-base-and-contact-dynamics.md)）。
+- **关节限位约束**也在此类算法里生效：`Model.positionLimitMargin` 决定限位约束的提前激活（**仅正向动力学用**，见 [§2.3.1 专栏](#231-专栏positionlimitmargin-是什么只在正向动力学用)）。后续读约束前向动力学源码时对照该专栏。
 
 > 记忆法：**`Data` 的每个字段几乎都精确对应某个算法的某个中间量**。看到陌生字段，去 `algorithm/` 里 grep 它的名字即可定位用途。
 
