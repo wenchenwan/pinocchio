@@ -817,11 +817,22 @@ namespace pinocchio
     const VectorXs & max_joint_friction,
     const VectorXs & joint_damping)
   {
+    // ============================================================
+    // addJoint 主实现（13 参数版，其余重载最终都汇聚到这里）。
+    // 作用：把一个关节追加到运动学树，并同步维护 Model 的全部并行数组与拓扑。
+    // 十个阶段：① 校验 → ② 分配 id/拷贝关节/写回索引 → ③ 读回本关节尺寸
+    //   → ④ push 树结构字段 → ⑤ 累加全局维度 → ⑥ resize+写入限位/驱动向量
+    //   → ⑦ subtrees → ⑧ supports → ⑨ 雅可比稀疏模式 → ⑩ mimic 记账。
+    // 前提：关节必须按【深度优先】添加，保证 parents[i] < i（递推算法的不变量）。
+    // ============================================================
+
+    // —— 阶段①：一致性断言 + 入参尺寸/范围校验 ——
+    // 四个并行数组长度必须都等于 njoints（不变量：它们始终同步增长）。
     assert(
       (njoints == (int)joints.size()) && (njoints == (int)inertias.size())
       && (njoints == (int)parents.size()) && (njoints == (int)jointPlacements.size()));
     assert((joint_model.nq() >= 0) && (joint_model.nv() >= 0) && (joint_model.nvExtended() >= 0));
-    assert(joint_model.nq() >= joint_model.nv());
+    assert(joint_model.nq() >= joint_model.nv()); // 位形维 ≥ 速度维（弯流形关节 nq>nv）
 
     PINOCCHIO_CHECK_ARGUMENT_SIZE(
       min_effort.size(), joint_model.nv(), "The joint minimal effort vector is not of right size");
@@ -862,12 +873,16 @@ namespace pinocchio
     PINOCCHIO_CHECK_INPUT_ARGUMENT(
       parent < (JointIndex)njoints, "The index of the parent joint is not valid.");
 
-    JointIndex joint_id = (JointIndex)(njoints++);
+    // —— 阶段②：分配关节 id、把关节拷贝进 joints、把全局起点写回关节对象 ——
+    JointIndex joint_id = (JointIndex)(njoints++); // 新 id = 旧 njoints，然后 njoints 自增
 
-    joints.push_back(JointModel(joint_model.derived()));
+    joints.push_back(JointModel(joint_model.derived())); // 拷贝一份存入树（variant 包装）
     JointModel & jmodel = joints.back();
+    // 把"本关节在全局 q/v/vExtended 里的起点"= 当前累计的 nq/nv/nvExtended 写回关节自身，
+    // 之后 jmodel.idx_q()/idx_v() 就能从全局向量里定位自己那几维（见 joint-model-base 的 i_q/i_v）。
     jmodel.setIndexes(joint_id, nq, nv, nvExtended);
 
+    // —— 阶段③：从关节对象读回它的尺寸与刚写入的起点 ——
     const int joint_nq = jmodel.nq();
     const int joint_idx_q = jmodel.idx_q();
     const int joint_nv = jmodel.nv();
@@ -879,13 +894,15 @@ namespace pinocchio
     assert(joint_idx_v >= 0);
     assert(joint_idx_vExtended >= 0);
 
-    inertias.push_back(Inertia::Zero());
-    parents.push_back(parent);
-    children.push_back(IndexVector());
-    children[parent].push_back(joint_id);
-    jointPlacements.push_back(joint_placement);
+    // —— 阶段④：追加逐关节的静态属性（并行数组同步增长一格） ——
+    inertias.push_back(Inertia::Zero());   // 惯量先置零，之后 appendBodyToJoint 再累加刚体
+    parents.push_back(parent);             // 记录父关节
+    children.push_back(IndexVector());     // 本关节暂无子节点
+    children[parent].push_back(joint_id);  // 反向：把自己登记进父的子列表
+    jointPlacements.push_back(joint_placement); // 相对父关节系的固定位姿 ^{parent}M_i
     names.push_back(joint_name);
 
+    // —— 阶段⑤：累加全局维度，并 push 本关节的段长/起点索引 ——
     nq += joint_nq;
     nqs.push_back(joint_nq);
     idx_qs.push_back(joint_idx_q);
@@ -896,6 +913,10 @@ namespace pinocchio
     nvExtendeds.push_back(joint_nvExtended);
     idx_vExtendeds.push_back(joint_idx_vExtended);
 
+    // —— 阶段⑥：把各限位/驱动向量扩容到新的 nv/nq，并写入本关节那一段 ——
+    // conservativeResize 保留已有元素、只在尾部扩容；再用 jointVelocitySelector（idx_v,nv 段）
+    // 或 jointConfigSelector（idx_q,nq 段）精确写入本关节对应的那几维。
+    // fixed/静止关节（nq==0）无需写限位，故用 if 跳过。
     if (joint_nq > 0 && joint_nv > 0)
     {
       upperEffortLimit.conservativeResize(nv);
@@ -905,6 +926,8 @@ namespace pinocchio
       upperVelocityLimit.conservativeResize(nv);
       jmodel.jointVelocitySelector(upperVelocityLimit) = max_velocity;
       lowerVelocityLimit.conservativeResize(nv);
+      // ⚠️ 疑似上游 BUG：此处赋 max_velocity，按同类项模式（lowerEffort=min_effort、
+      //    lowerPosition=min_config、lowerDryFriction=min_joint_friction）应为 min_velocity。
       jmodel.jointVelocitySelector(lowerVelocityLimit) = max_velocity;
       lowerPositionLimit.conservativeResize(nq);
       jmodel.jointConfigSelector(lowerPositionLimit) = min_config;
@@ -927,17 +950,19 @@ namespace pinocchio
       jmodel.jointVelocitySelector(damping) = joint_damping;
     }
 
+    // —— 阶段⑦：subtrees（子树）——本关节子树先只含自己，再把自己加进所有祖先的子树。
     // Init and add joint index to its parent subtrees.
     subtrees.push_back(IndexVector(1));
     subtrees[joint_id][0] = joint_id;
-    addJointIndexToParentSubtrees(joint_id);
+    addJointIndexToParentSubtrees(joint_id); // 沿 parents 上溯，把 joint_id 追加进每个祖先 subtree
 
+    // —— 阶段⑧：supports（支撑路径）——继承父的"根→父"路径，再把自己接在末尾 = 根→本关节。
     // Init and add joint index to the supports
     supports.push_back(supports[parent]);
     supports[joint_id].push_back(joint_id);
 
-    // Resize existing BooleanVectors to the new nv, zero-initializing the new tail entries.
-    // conservativeResize alone does not initialize new elements.
+    // —— 阶段⑨：雅可比稀疏模式 ——
+    // 先把已存在的布尔向量都扩容到新 nv（conservativeResize 不初始化新元素，故手动清零尾部）。
     if (joint_nq > 0 && joint_nv > 0)
     {
       for (auto & sparsity : sparsity_pattern_vector)
@@ -948,23 +973,26 @@ namespace pinocchio
       }
     }
 
+    // 构建本关节的非零列集合 extended_support：= 支撑路径上所有祖先关节各自的 v 段 + 本关节 v 段。
+    // 含义：末端关节 j 的空间速度由"根到 j 路径上所有关节的速度"决定，故这些列在雅可比里非零。
     // Build sparsity pattern and span indexes of the new joint.
     EigenIndexVector extended_support;
     extended_support.reserve(size_t(nv));
     const auto & jsupport = supports[joint_id];
-    for (size_t j = 1; j < jsupport.size() - 1; ++j)
+    for (size_t j = 1; j < jsupport.size() - 1; ++j) // 遍历祖先（跳过首元 universe 与末元自己）
     {
       const JointIndex jsupport_id = jsupport[j];
       const int jsupport_nv = nvs[jsupport_id];
       const int jsupport_idx_v = idx_vs[jsupport_id];
-      for (int k = 0; k < jsupport_nv; ++k)
+      for (int k = 0; k < jsupport_nv; ++k) // 展开该祖先占据的 [idx_v, idx_v+nv) 列
         extended_support.push_back(jsupport_idx_v + k);
     }
-    for (int k = 0; k < joint_nv; ++k)
+    for (int k = 0; k < joint_nv; ++k) // 末尾补上本关节自己的 v 列
     {
       extended_support.push_back(joint_idx_v + k);
     }
 
+    // span_indexes_vector 存"非零列索引列表"，sparsity_pattern_vector 存等价的布尔掩码。
     BooleanVector sparsity_pattern = BooleanVector::Zero(nv);
     for (const auto col_id : extended_support)
       sparsity_pattern[col_id] = true;
@@ -972,17 +1000,20 @@ namespace pinocchio
     sparsity_pattern_vector.push_back(std::move(sparsity_pattern));
     span_indexes_vector.push_back(std::move(extended_support));
 
+    // —— 阶段⑩：mimic（耦合关节）记账 ——
+    // mimic_joint_supports 继承父的 mimic 路径；仅当本关节是 mimic 类型时才追加自己，
+    // 并登记 跟随者→被跟随者 的对应（见 §mimic 与 nvExtended）。
     // Update mimicking.
     mimic_joint_supports.push_back(mimic_joint_supports[parent]);
     if (
       const auto & jmodel_ =
         boost::get<JointModelMimicTpl<Scalar, Options, JointCollectionTpl>>(&jmodel))
     {
-      mimicking_joints.push_back(jmodel.id());
-      mimicked_joints.push_back(jmodel_->jmodel().id());
+      mimicking_joints.push_back(jmodel.id());           // 本(跟随)关节 id
+      mimicked_joints.push_back(jmodel_->jmodel().id()); // 它所镜像的(被跟随)关节 id
       mimic_joint_supports[joint_id].push_back(joint_id);
     }
-    return joint_id;
+    return joint_id; // 返回新关节的全局 id，供 appendBodyToJoint / addJointFrame 引用
   }
 
   template<typename Scalar, int Options, template<typename, int> class JointCollectionTpl>

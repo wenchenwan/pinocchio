@@ -274,20 +274,65 @@ JointIndex addJoint(JointIndex parent, const JointModelBase<D>& jmodel,
                     const SE3& joint_placement, const std::string& name, ...);
 ```
 
-**7 个重载**，参数逐级增加（是否给力矩/速度/位置限位、摩擦、阻尼），最终都汇聚到同一个总实现。
-内部流程：
-
-```
-njoints++  →  joints.push_back(...)  →  jmodel.setIndexes(id, nq, nv, nvExtended)
-          →  累加 nq/nv/nvExtended，push idx_qs/nqs/...
-          →  conservativeResize 各限位向量并写入
-          →  parents.push_back / children[parent].push_back
-          →  更新 supports、subtrees、sparsity_pattern_vector
-          →  若是 mimic 关节，登记 mimicking/mimicked_joints
-```
+**7 个重载**，参数逐级增加（是否给力矩/速度/位置限位、摩擦、阻尼），最终都**汇聚到同一个 13 参总实现**（见 §2.5 逐步解析）。
 
 > ⚠️ **必须按深度优先顺序添加**：`parents[i] < i` 是所有递推算法的前提
 > （正向遍历 `for i=1..njoints` 时父节点必已算完）。传入未注册的 `parent` 会破坏这个不变量。
+
+### 2.5 `addJoint` 主实现逐步解析（建树的核心）
+
+所有 `addJoint` 重载最终调用同一个 **13 参总实现**（[model.hxx:802](../include/pinocchio/src/multibody/model.hxx#L802)）。它做的事：**把一个关节追加进树，并同步维护 Model 里几十个并行数组与拓扑结构**。理解它 = 理解 §2.3 那些字段是怎么长出来的。
+
+**13 个参数的含义**（用户常问的那一长串）：
+
+| 参数 | 维度 | 作用 |
+|------|------|------|
+| `parent` | — | 父关节 id（必须已注册，保证 `parent < 新 id`） |
+| `joint_model` | — | 关节模型（决定 nq/nv、运动子空间 S） |
+| `joint_placement` | SE3 | 关节相对父关节系的固定位姿 ${}^{\lambda(i)}M_i$ |
+| `joint_name` | — | 关节名（`getJointId` 反查用） |
+| `min_effort`/`max_effort` | nv | 力矩（广义力）下/上限 |
+| `min_velocity`/`max_velocity` | nv | 速度下/上限 |
+| `min_config`/`max_config` | nq | 位置下/上限 |
+| `config_limit_margin` | nq | 限位提前激活缓冲带（见 §2.3.1，仅正向动力学用） |
+| `min_joint_friction`/`max_joint_friction` | nv | 干摩擦下/上限 |
+| `joint_damping` | nv | 粘滞阻尼 |
+
+**十个执行阶段**（源码已加对应中文注释）：
+
+| 阶段 | 做什么 | 关键点 |
+|------|--------|--------|
+| **① 校验** | 断言 4 个并行数组长度 == `njoints`；`PINOCCHIO_CHECK` 所有限位向量尺寸、`min≤max`、`parent` 合法 | 不变量：`joints/inertias/parents/jointPlacements` 始终同步等长 |
+| **② 分配 id + 拷贝 + 写回索引** | `joint_id = njoints++`；`joints.push_back(拷贝)`；`jmodel.setIndexes(id, nq, nv, nvExtended)` | **把"本关节在全局 q/v 里的起点 = 当前累计 nq/nv"写回关节自身**——这就是 `jmodel.idx_q()` 能定位的机制 |
+| **③ 读回尺寸** | 从 `jmodel` 取 `joint_nq/idx_q/joint_nv/idx_v/...` | 供后续累加与稀疏模式用 |
+| **④ push 树属性** | `inertias`(先 Zero)、`parents`、`children`、`children[parent]`(反向登记)、`jointPlacements`、`names` 各追加一格 | 惯量置零，等 `appendBodyToJoint` 再填 |
+| **⑤ 累加全局维度** | `nq += joint_nq` 等；push `nqs/idx_qs/nvs/idx_vs/nvExtendeds/idx_vExtendeds` | 全局 nq/nv/nvExtended 在此增长 |
+| **⑥ resize + 写限位/驱动** | 每个限位/驱动向量 `conservativeResize(nv 或 nq)` 保留旧值扩容，再用 `jointVelocitySelector`/`jointConfigSelector` 精确写入本关节段 | fixed 关节（nq==0）跳过。armature/rotorInertia 置零、rotorGearRatio 置一 |
+| **⑦ subtrees** | 本关节子树先只含自己；`addJointIndexToParentSubtrees` 沿 parents 上溯，把 id 加进**每个祖先**的子树 | CRBA 累加范围的来源 |
+| **⑧ supports** | 继承父的"根→父"路径，末尾接自己 = **根→本关节** 的完整路径 | 雅可比列稀疏性的来源 |
+| **⑨ 雅可比稀疏模式** | 先把已有布尔向量扩容到新 nv 并清零尾部；再由 supports 路径构建本关节的**非零列集合** `extended_support`（= 各祖先的 v 段 + 自己的 v 段），写进 `span_indexes_vector`（索引）与 `sparsity_pattern_vector`（布尔掩码） | 含义：末端关节速度由"根到它路径上所有关节的速度"决定，故这些列非零 |
+| **⑩ mimic 记账** | `mimic_joint_supports` 继承父路径；若本关节是 mimic 类型，追加自己并登记 `mimicking_joints`(跟随者)→`mimicked_joints`(被跟随者) | 见 [§9.2](#92-mimicjoint-mimichxx) 与 `nvExtended` |
+
+**一句话**：`addJoint` = 校验 → 把关节拷进树并把全局起点写回关节自身 → 同步累加维度与所有并行数组 → 用 supports/subtrees/稀疏模式把树拓扑固化下来（供 $O(n)$ 算法用）→ 处理 mimic 耦合。**它是 §2.3 所有字段的唯一构造者。**
+
+> ⚠️ **源码里发现一处疑似上游 BUG**（[model.hxx](../include/pinocchio/src/multibody/model.hxx) 阶段⑥）：`lowerVelocityLimit` 被赋 `max_velocity`，但按同类项模式（`lowerEffortLimit=min_effort`、`lowerPositionLimit=min_config`、`lowerDryFrictionLimit=min_joint_friction`）应为 `min_velocity`。已在源码加注释标记，**未改动行为**（改动会影响下游，需上游确认）。
+
+**③ 其它建树辅助方法**
+
+| 方法 | 作用 |
+|------|------|
+| `appendBodyToJoint(joint_id, Y, placement)` | 把刚体空间惯量 `Y`（换算到关节系后）累加进 `inertias[joint_id]` |
+| `addJointFrame(joint_id, prev_frame)` | 给关节挂一个同名 `JOINT` 型 Frame（冗余但便于查询） |
+| `addBodyFrame(name, parentJoint, placement, parentFrame)` | 加一个 `BODY` 型 Frame |
+| `addFrame(frame, append_inertia)` | 注册任意 Frame；若带惯量且 `append_inertia`，惯量并入父关节 |
+| `createData()` | 按当前 Model 分配配对的 `Data` |
+| `getJointId/getBodyId/getFrameId` `existJointName/...` | 按名字反查索引（线性扫 `names`/`frames`） |
+
+**④ `cast<NewScalar>()` / `operator=` / `operator==`**
+
+- `cast`：逐字段 `.cast<>()`——标量数组、`joints[k].cast()`、`inertias[k].cast()`、`frames[k].cast()`、`referenceConfigurations` 逐条转换，产出 `ModelTpl<NewScalar,…>`（autodiff/多精度入口，见 [源码解析.md 条目 2](源码解析.md)）。
+- `operator=`（跨关节集合模板版）：逐字段拷贝，`joints` 用 `push_back` 逐个转换。
+- `operator==`：逐字段比较，含 `referenceConfigurations` 逐键逐向量、各限位向量尺寸+数值。
 
 | 其余建树方法 | 说明 |
 |---|---|
