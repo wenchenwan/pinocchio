@@ -138,9 +138,20 @@ namespace pinocchio
 
     } // namespace helper
 
-    template<typename D1, int Level1, typename D2, int Level2>
-    bool
-    compare_maps(const Eigen::MapBase<D1, Level1> & map1, const Eigen::MapBase<D2, Level2> & map2)
+    /// \brief Coefficient-wise comparison of two Eigen maps (sizes first, then values).
+    ///
+    /// \note The parameters are taken as the concrete map types constrained by SFINAE rather
+    ///       than as `Eigen::MapBase<D, Level>`. `Eigen::Map<T>` derives from
+    ///       `MapBase<Map<T>, WriteAccessors>`, which itself derives from
+    ///       `MapBase<Map<T>, ReadOnlyAccessors>`. Both bases match `MapBase<D, Level>` with a
+    ///       different `Level`, so the deduced base is not unique and, per [temp.deduct.call],
+    ///       deduction fails outright ("'const Eigen::MapBase<D1, Level1>' is an ambiguous base
+    ///       class of 'const Eigen::Map<...>'").
+    template<
+      typename D1,
+      typename D2,
+      typename = std::enable_if_t<helper::is_eigen_map_v<D1> && helper::is_eigen_map_v<D2>>>
+    bool compare_maps(const D1 & map1, const D2 & map2)
     {
       if ((map1.rows() != map2.rows()) || (map1.cols() != map2.cols()))
         return false;
