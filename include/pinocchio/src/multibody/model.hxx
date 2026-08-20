@@ -95,14 +95,20 @@ namespace pinocchio
     typedef std::vector<EigenIndexVector> VectorOfEigenIndexVector;
 
     /// \brief Dense vectorized version of a joint configuration vector.
+    // 位形向量类型：长度 = nq，住在【位形流形】上（含四元数等冗余表示，如球副 4 维、浮动基 7 维）。
+    // 底层就是 VectorXs（动态列向量），此 typedef 仅作【语义标注】——提示"这是 q，别直接加减"。
     typedef VectorXs ConfigVectorType;
 
     /// \brief Map between a string (key) and a configuration vector
+    // 命名位形字典：名字 → q（如 SRDF 的 "half_sitting"）。referenceConfigurations 用它。
     typedef std::map<std::string, ConfigVectorType> ConfigVectorMap;
 
     /// \brief Dense vectorized version of a joint tangent vector (e.g. velocity, acceleration,
     /// etc).
     ///        It also handles the notion of co-tangent vector (e.g. torque, etc).
+    // 切向量类型：长度 = nv，住在位形流形的【切空间】T_qQ（广义速度 q̇、加速度 q̈）。
+    // 同时也复用作【余切/对偶】向量（力矩 τ、广义力）——因 Pinocchio 里力与速度同为 nv 维列向量。
+    // 与 ConfigVectorType 在 C++ 层是同一类型(VectorXs)，区别纯属语义：nv 维 vs nq 维、切空间 vs 流形。
     typedef VectorXs TangentVectorType;
 
     // =========================================================================
@@ -179,9 +185,11 @@ namespace pinocchio
     /// the set (i==parents[k] for k in mu(i)).
     std::vector<IndexVector> children; // children[i]：关节 i 的全部直接子关节（parents 的逆映射）
 
+    // 跟随者关节 ID 列表
     /// \brief Vector of mimicking joints in the tree (with type MimicTpl)
     std::vector<JointIndex> mimicking_joints; // 所有 mimic（从动）关节的 id
 
+    // 被跟随者 ID 列表
     /// \brief Vector of mimicked joints in the tree (can be any joint type)
     /// The i-th element of this vector correspond to the mimicked joint of the i-th mimicking
     /// vector in mimicking_joints
@@ -283,11 +291,13 @@ namespace pinocchio
     /// \brief Sparsity pattern for each joint.
     /// sparsity_pattern_vector[i] is a boolean vector of size nv indicating which columns
     /// of the Jacobian are nonzero for joint i.
-    VectorOfBooleanVector sparsity_pattern_vector; // 稠密布尔掩码版：适合做按位与/或
+    // 用于指定雅可比矩阵哪些列是非零的稀疏模式。sparsity_pattern_vector[i] 是一个布尔向量，长度为 nv，表示关节 i 的雅可比矩阵中哪些列是非零的。
+    VectorOfBooleanVector sparsity_pattern_vector;
 
     /// \brief Colwise span indexes for each joints.
     /// span_indexes_vector[i] lists the column indexes of nonzero entries for joint i.
-    VectorOfEigenIndexVector span_indexes_vector; // 同一信息的下标列表版：适合直接遍历非零列
+    // 列出了关节 i 的非零元素所对应的列索引
+    VectorOfEigenIndexVector span_indexes_vector;
 
     /// \brief Spatial gravity of the model.
     Motion gravity; // 重力的空间加速度表示（linear = g，angular = 0）。
@@ -1139,6 +1149,8 @@ namespace pinocchio
     // 先把已存在的布尔向量都扩容到新 nv（conservativeResize 不初始化新元素，故手动清零尾部）。
     if (joint_nq > 0 && joint_nv > 0)
     {
+      // sparsity_pattern_vector 里每个元素都是一个布尔向量，长度 nv，表示对应关节的雅可比在全
+      // 局速度向量里的非零列。
       for (auto & sparsity : sparsity_pattern_vector)
       {
         const Eigen::Index old_size = sparsity.size();
@@ -1150,6 +1162,8 @@ namespace pinocchio
     // 构建本关节的非零列集合 extended_support：= 支撑路径上所有祖先关节各自的 v 段 + 本关节 v 段。
     // 含义：末端关节 j 的空间速度由"根到 j 路径上所有关节的速度"决定，故这些列在雅可比里非零。
     // Build sparsity pattern and span indexes of the new joint.
+
+    // 一句话：supports 回答"路径上有哪些关节"，extended_support 回答"这些关节占了雅可比的哪些列"。
     EigenIndexVector extended_support;
     extended_support.reserve(size_t(nv));
     const auto & jsupport = supports[joint_id];
