@@ -1595,6 +1595,8 @@ namespace pinocchio
     return res;
   }
 
+
+  // 将一个刚体固定到一个关节上
   template<typename Scalar, int Options, template<typename, int> class JointCollectionTpl>
   void ModelTpl<Scalar, Options, JointCollectionTpl>::appendBodyToJoint(
     const typename ModelTpl::JointIndex joint_index, const Inertia & Y, const SE3 & body_placement)
@@ -1619,6 +1621,8 @@ namespace pinocchio
       parentFrame = (int)getFrameId(names[parentJoint], (FrameType)(JOINT | FIXED_JOINT));
     }
     PINOCCHIO_CHECK_INPUT_ARGUMENT((size_t)parentFrame < frames.size(), "Frame index out of bound");
+
+    // 坐标系name 挂在哪个joint上 父坐标系 相对父坐标系的位姿 坐标系类型
     return addFrame(Frame(body_name, parentJoint, (FrameIndex)parentFrame, body_placement, BODY));
   }
 
@@ -1679,6 +1683,12 @@ namespace pinocchio
            != frames.end();
   }
 
+  // ============================================================
+  // addFrame：把一个坐标系登记到模型，并可选地把它携带的质量并入父关节。
+  // 这是所有 add*Frame 接口（addJointFrame / addBodyFrame / 各解析器）的最终落点。
+  // Frame 不产生自由度，所以本函数不动 nq/nv/nvExtended，只改 frames/nframes
+  // 以及（当 append_inertia 为真时）inertias。
+  // ============================================================
   template<typename Scalar, int Options, template<typename, int> class JointCollectionTpl>
   typename ModelTpl<Scalar, Options, JointCollectionTpl>::FrameIndex
   ModelTpl<Scalar, Options, JointCollectionTpl>::addFrame(
@@ -1691,6 +1701,9 @@ namespace pinocchio
     //    PINOCCHIO_CHECK_INPUT_ARGUMENT(frame.inertia.isValid(),
     //                                   "The input inertia is not valid.")
 
+    // 幂等：同名【且同类型】的 Frame 已存在就直接返回原下标。
+    // 这既避免了重复插入，也避免了下面的惯量被重复累加（+= 不是幂等操作）。
+    // 注意判重要求 name 与 type 都相同——同名不同类型可以共存（见 FrameType 位掩码）。
     // Check if the frame.name exists with the same type
     if (existFrame(frame.name, frame.type))
     {
@@ -1698,12 +1711,44 @@ namespace pinocchio
     }
     // else: we must add a new frames to the current stack
     frames.push_back(frame);
+
+    // —— 惯量并入：固定关节折叠的最后一环 ——
+    //
+    // 两步，顺序不可交换：
+    //   ① frame.placement.act(frame.inertia)
+    //      placement 是 ^iM_f（Frame 相对父关节系的固定位姿），把惯量从 Frame 系
+    //      变换到父关节系。InertiaTpl 存的是紧凑三元组 (m, c, I_c)，故变换为：
+    //        m 不变（标量，与坐标系无关）
+    //        c ← p + R·c      （质心当作一个"点"做刚体变换）
+    //        I_c ← R·I_c·Rᵀ   （只旋转不平移，因为 I_c 是绕质心的量）
+    //      等价的 6x6 形式是余伴随合同变换 ^iY = ^iX_f^* · ^fY · ^fX_i，
+    //      平行轴项 −m[c]ₓ² 被推迟到 matrix() 展开时才出现。
+    //
+    //   ② operator+= （复合刚体惯量）
+    //        m_ab = m_a + m_b
+    //        c_ab = (m_a·c_a + m_b·c_b) / m_ab
+    //        I_ab = I_a + I_b − (m_a·m_b/m_ab)·[c_a − c_b]ₓ²
+    //      末项系数是约化质量；由于 [v]ₓ² = v·vᵀ − ‖v‖²·I，减去它相当于加一个
+    //      半正定量——两质心分得越开，绕新公共质心的转动惯量越大，符合物理直觉。
+    //
+    // 【为什么必须先变换再相加】惯量只有表达在同一坐标系下才能相加。
+    // frame.inertia 在 Frame 系、inertias[parentJoint] 在关节系，不对齐就无意义。
+    //
+    // 【用途】URDF 的 fixed 关节不进运动学树（否则白占一个零自由度节点），而是
+    // 降级成带惯量的 FIXED_JOINT 帧，靠这一行把被折叠掉的子连杆质量并进最近的
+    // 真实关节：几何信息留在 Frame 里（位姿仍可查询），质量进复合刚体。
+    //
+    // 【安全性】addJointFrame / addBodyFrame 建的 Frame 惯量是 Inertia::Zero()，
+    // 走这一行是空操作（__plus__ 里用 max(mab, eps) 防了零质量相加时的除零）。
+    // 手工建 Frame 又不想动质量属性时，让 inertia 保持 Zero，或显式传 false。
     if (append_inertia)
       inertias[frame.parentJoint] += frame.placement.act(frame.inertia);
     nframes++;
     return FrameIndex(nframes - 1);
   }
 
+
+  // TODO: 阅读到这里了
   template<typename Scalar, int Options, template<typename, int> class JointCollectionTpl>
   void ModelTpl<Scalar, Options, JointCollectionTpl>::addJointIndexToParentSubtrees(
     const JointIndex joint_id)

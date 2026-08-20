@@ -939,8 +939,155 @@ enum FrameType {
 model.getFrameId("tool0", FrameType(JOINT | BODY));   // 在两类里找
 ```
 
+存在的意义：**同名但不同类型的 Frame 可以共存**（URDF 里关节名与连杆名撞车是常事），
+靠 `type` 掩码区分。`getFrameId` / `existFrame` 的 `type` 参数默认是全部类型的并集：
+
+```cpp
+const FrameType & type = (FrameType)(JOINT | FIXED_JOINT | BODY | OP_FRAME | SENSOR)
+```
+
 > 实测（样例人形）：70 个 Frame 的类型分布为 `BODY:40, JOINT:29, FIXED_JOINT:1`；
-> 按 `JOINT|BODY` 组合查询能正确命中。`getFrameId` 的 `type` 参数默认是**全部类型的并集**。
+> 按 `JOINT|BODY` 组合查询能正确命中。
+
+#### 4.3.1 共同点：`type` 不参与任何计算
+
+五种类型**在运动学上完全等价**，位姿一律由
+
+$$^oM_f = {}^oM_i \cdot \texttt{placement}\qquad(i = \texttt{parentJoint})$$
+
+算出。`type` 不影响任何公式，它纯粹是**语义标签 + 检索键**。
+唯一的例外是 `FIXED_JOINT` 会通过惯量并入间接影响动力学（见 4.3.3）。
+
+#### 4.3.2 `JOINT`：关节帧
+
+零偏移地贴在一个**真实关节**上，即 $^oM_f \equiv {}^oM_i$。由 `addJointFrame` 创建
+（`placement = SE3::Identity()`）。
+
+作用是让关节能走统一的 Frame API（`getFrameId` / `getFrameJacobian`），
+而不必让调用方区分"这是关节还是坐标系"。源码注释称其为 *"redundant information but useful"*。
+
+> 枚举注释里的 *child frame* 指它贴的是关节的**子连杆**一侧，即关节转动后跟着动的那一侧。
+
+#### 4.3.3 `FIXED_JOINT`：固定关节帧（唯一影响动力学的类型）
+
+URDF 里 `type="fixed"` 的关节**不会**变成 Pinocchio 的关节（那样会白白多一个零自由度节点），
+而是被折叠成一个 `FIXED_JOINT` 帧。机制在 `parsers/urdf/model.hxx:341-343`：
+
+```cpp
+model.addFrame(Frame(
+  joint_name, parent_frame.parentJoint, parent_frame_id, placement, FIXED_JOINT, Y));
+//                                                                              ^ 带惯量
+```
+
+注意最后传了惯量 `Y`。而 `addFrame` 默认 `append_inertia = true`：
+
+```cpp
+if (append_inertia)
+  inertias[frame.parentJoint] += frame.placement.act(frame.inertia);
+```
+
+于是被折叠掉的子连杆质量，经 `placement` 变换后**累加**到最近的真实关节上。
+**这就是固定关节折叠的完整实现**——几何信息留在帧里（位姿仍可查询），
+质量并进父关节的复合刚体。
+
+这一行虽短，却是两个独立操作的复合，**顺序不可交换**：
+
+**① `frame.placement.act(frame.inertia)` —— 换系**
+
+`placement` 是 ${}^iM_f$。`InertiaTpl` 存的是紧凑三元组 $(m,\,c,\,I_c)$，所以变换写成：
+
+| 分量 | 公式 | 说明 |
+|---|---|---|
+| 质量 | $m_i = m_f$ | 标量，与坐标系无关 |
+| 杆臂 | $c_i = p + R\,c_f$ | 质心当作一个**点**做刚体变换 |
+| 转动惯量 | $I_{c,i} = R\,I_{c,f}\,R^\top$ | **只旋转不平移** |
+
+之所以看不到平行轴定理，是因为 $I_c$ 定义在质心处，质心搬到哪儿已由 $c$ 记录。
+平行轴项 $-m[c]_\times^2$ 要到展开成 $6\times6$ 时才出现：
+
+$$Y_{6\times6}=\begin{bmatrix} m\,\mathbb{1}_3 & -m[c]_\times \\ m[c]_\times & I_c-m[c]_\times^2\end{bmatrix}$$
+
+等价的 $6\times6$ 形式是余伴随合同变换 ${}^{i}Y={}^{i}X_f^{*}\,{}^{f}Y\,{}^{f}X_i$。
+**紧凑表示把平行轴项推迟到最后一刻**，这是 Pinocchio 惯量运算快的原因之一。
+详见 [空间代数解析 §6.4](空间代数运算解析.md#64-ise3actionm把惯量变换到另一坐标系)。
+
+**② `+=` —— 复合刚体**
+
+$$m_{ab}=m_a+m_b,\qquad c_{ab}=\frac{m_ac_a+m_bc_b}{m_{ab}},\qquad
+I_{ab}=I_a+I_b-\frac{m_am_b}{m_{ab}}\big[c_a-c_b\big]_\times^2$$
+
+末项系数 $\mu=\dfrac{m_am_b}{m_a+m_b}$ 是**约化质量**。由于 pinocchio 的约定
+$[v]_\times^2=vv^\top-\|v\|^2\mathbb{1}$，减去它等于**加上**一个半正定量——
+两质心分得越开，绕新公共质心的转动惯量越大，符合物理直觉。
+详见 [空间代数解析 §6.3](空间代数运算解析.md#63-i_a--i_b复合刚体惯量crba-核心)。
+
+> **为什么必须先变换再相加**：惯量只有表达在**同一坐标系**下才能相加。
+> `frame.inertia` 在 Frame 系、`inertias[parentJoint]` 在关节系，不对齐则无意义。
+
+> **幂等性**：`+=` 不是幂等操作，但 `addFrame` 开头的 `existFrame` 判重
+> （同名**且**同类型直接 return）挡住了重复累加。同一关节挂多个**不同名**的
+> 带惯量 Frame 时会各自累加——这是设计意图，不是 bug。
+
+另外两处也产 `FIXED_JOINT`：
+
+- `buildReducedModel` 锁定关节时（`algorithm/model.hxx:632`）；
+- **universe 自己**（`model.hxx:353`）：
+  ```cpp
+  addFrame(Frame("universe", 0, 0, SE3::Identity(), FIXED_JOINT));
+  ```
+
+universe 被登记成 `FIXED_JOINT` 而非 `JOINT`——这正是 `addJointFrame` / `addBodyFrame`
+里查父帧时掩码必须写成 `JOINT | FIXED_JOINT` 的原因（`model.hxx:1326-1329`、`1617-1619`，
+两处都留了同样的解释性注释）。源码里还有一条 FIXME 在质疑这个设计选择。
+
+#### 4.3.4 `BODY`：连杆帧
+
+标记一个**连杆**（碰撞体 / 视觉体 / 惯性属性的挂载点）。由 `Model::addBodyFrame` 创建，
+注意它**不带惯量**（`model.hxx:1622`）：
+
+```cpp
+return addFrame(Frame(body_name, parentJoint, (FrameIndex)parentFrame, body_placement, BODY));
+//                                                    inertia 用默认的 Inertia::Zero()  ^
+```
+
+所以走公开 API 建的 `BODY` 帧是纯几何标记，不改质量属性。
+
+> **别把 `addBodyFrame` 和 `appendBodyToJoint` 搞混**：前者注册一个可查询的坐标系，
+> 后者往 `inertias[i]` 累加质量。两件独立的事。
+
+#### 4.3.5 `OP_FRAME`：操作帧
+
+用户在**运行时**自定义的坐标系：TCP、抓取点、相机安装位、控制目标点……
+凡是"URDF 里没有但我需要拿它的位姿和雅可比"的，都建成 `OP_FRAME`。
+MJCF 解析器把 `<site>` 元素映射到这里（`mjcf-graph.cpp:1134`）。
+
+**这是日常写 IK / 阻抗控制时唯一会主动创建的类型。**
+
+#### 4.3.6 `SENSOR`：传感器帧
+
+IMU、力矩传感器、相机等传感器元件的安装位姿，目前只有 graph 解析器会产出
+（`parsers/graph/frames.hxx:37`）。功能上与 `OP_FRAME` 无差别，纯粹是语义分类，
+方便按类别批量筛选。
+
+#### 4.3.7 对照表
+
+| 类型 | 典型来源 | 带惯量？ | 影响动力学？ | 你会主动建吗 |
+|---|---|---|---|---|
+| `JOINT` | `addJointFrame` | 否 | 否 | 建模时紧跟 `addJoint` |
+| `FIXED_JOINT` | URDF fixed 关节、`buildReducedModel`、universe | **是** | **是**（惯量并入父关节） | 很少 |
+| `BODY` | `addBodyFrame`、URDF link | 否（API 建的） | 否 | 偶尔 |
+| `OP_FRAME` | 用户代码、MJCF `<site>` | 否 | 否 | **最常用** |
+| `SENSOR` | graph 解析器 | 否 | 否 | 很少 |
+
+#### 4.3.8 两个实用提醒
+
+1. **`getFrameId` 找不到时返回 `frames.size()`**（越界哨兵），不抛异常。
+   掩码给窄了会静默拿到坏下标，务必先用 `existFrame` 校验。
+2. **筛选时按掩码分组，而非逐个判等**。真实消费者的写法如 `parsers/sdf/geometry.cpp:317`：
+   ```cpp
+   (fm->type != FIXED_JOINT && fm->type != JOINT)   // 跳过关节类帧
+   ```
+   用掩码写更直接：`fm->type & (JOINT | FIXED_JOINT)`。
 
 ### 4.4 Frame vs Joint：最常见的困惑
 
@@ -1721,6 +1868,7 @@ for each frame f:
 | `data.J` 为什么列数不等于 `nv` | `model.hxx`+`jacobian.hxx`（§9.2）                       | `nvExtended`、`idx_vExtendeds`、`idx_vExtended_to_idx_v_fromRow`                |
 | 某算法的中间量存哪             | `data.hxx`                                                | `DataTpl` 对应字段（grep 字段名到 algorithm/）                                  |
 | 坐标系 vs 关节                 | `frame.hxx`,`model-item.hxx`                              | `FrameTpl`，`FrameType`，`oMf=oMi·placement`                                   |
+| 五种 `FrameType` 的区别 | `frame.hxx`（§4.3） | 只有 `FIXED_JOINT` 影响动力学（惯量并入父关节）；日常自定义用 `OP_FRAME` |
 | 加新关节类型                   | `joint/joint-xxx.hxx` + `joint-collection.hxx`            | 仿 revolute 写 Model/Data/Constraint/Motion/Transform                           |
 | 关节允许的运动方向             | `joint-motion-subspace-*.hxx`                             | $v=S\dot q$，$\tau=S^\top f$                                                    |
 | 关节怎么把 q 变成位姿          | 各关节`calc`                                              | `data.M`，`data.S`，`data.v`                                                    |
