@@ -1668,6 +1668,8 @@ namespace pinocchio
     std::ostringstream os;
     os << "Several frames match the filter - please specify the FrameType (name=\"" << name
        << "\", type=\"" << type << "\")";
+    
+    // 在查询到一个joint之后，继续查找是否还有其他同名同类型的frame，如果有则报错
     PINOCCHIO_CHECK_INPUT_ARGUMENT(
       ((it == frames.end()
         || (std::find_if(boost::next(it), frames.end(), details::FilterFrame(name, type)) == frames.end()))),

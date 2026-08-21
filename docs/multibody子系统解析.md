@@ -843,24 +843,74 @@ ModelTpl & operator=(const ModelTpl & other) {
 > `Yaba` 与 `Ycrb` 的区别正是 ABA 与 CRBA 的分野：**`crb` 假设子关节锁死**（对应 $M$），
 > **`aba` 假设子关节自由响应**（对应 $M^{-1}$）。
 
-### 3.5 稀疏 Cholesky（$M = U D U^\top$）
-
+### 3.5 稀疏 Cholesky（$M = U D U^\top$）与 `_fromRow` 索引
 
 | 字段                                                  | 含义                       |
 | ----------------------------------------------------- | -------------------------- |
 | `U`                                                   | 单位上三角因子             |
 | `D` / `Dinv`                                          | 对角块及其逆               |
 | `tmp`                                                 | 求解时的工作向量           |
-| `parents_fromRow[k]`                                  | 自由度$k$ 的"父自由度"     |
-| `nvSubtree_fromRow[k]`                                | 从行$k$ 起子树占的自由度数 |
-| `supports_fromRow[k]`                                 | 行$k$ 的支撑集             |
-| `start_idx_v_fromRow` / `end_idx_v_fromRow`           | 行区间边界                 |
-| `mimic_parents_fromRow` / `non_mimic_parents_fromRow` | mimic 场景下的分支版本     |
+| `parents_fromRow[k]`                                  | 行$k$ 的"父行"（−1 为根）  |
+| `nvSubtree_fromRow[k]`                                | 以行$k$ 为根的子树占几行   |
+| `supports_fromRow[k]`                                 | 行$k$ 的祖先行集（支撑）   |
+| `start_idx_v_fromRow` / `end_idx_v_fromRow`           | 子树的行区间 `[start,end]` |
+| `mimic_parents_fromRow` / `non_mimic_parents_fromRow` | mimic 场景下拆成的两条子链 |
 
-**为什么要 `_fromRow` 这一套**：Model 里的 `parents`/`subtrees` 是**按关节**组织的，
-而稀疏 Cholesky 要**按自由度行**遍历（一个球关节占 3 行）。构造 `Data` 时由
-`computeParents_fromRow` / `computeSupports_fromRow` / `computeNvSubtree` 一次性把
-关节级拓扑"展开"到自由度级，之后分解直接按行跳转，无需反复换算。
+#### 3.5.1 `_fromRow` 到底是什么：把树从"关节视角"换成"自由度行视角"
+
+一句话：**`_fromRow` = 用质量矩阵 $M$ 的行（= 自由度）来重新表达 [§2.4](#24-树拓扑深入parents--children--supports--subtrees) 的那棵树**。`parents`/`subtrees`/`supports` 是"按**关节 id**"组织的；`_fromRow` 是同一棵树"按 $M$ 的**行号**"组织的平行副本。
+
+**为什么需要换视角**：
+
+- $M$ 是 $n_v\times n_v$，第 $k$ 行/列 = 第 $k$ 个速度自由度（`idx_v` 那套）。
+- 稀疏 Cholesky（$M=UDU^\top$）是**逐行消元**的，每处理一行 $k$ 要知道"它和哪些行耦合"——即 **DoF 级的消去树**（行 $k$ 的父行、子树、祖先）。
+- 而 Model 的 `parents`/`subtrees` 是**关节级**的：一个球副占 3 行、浮动基占 6 行，关节级信息**粒度不够**（只说"关节 2 父是关节 1"，不说"第 6 行父是第 5 行"）。
+
+于是构造 `Data` 时把关节级拓扑**展开到自由度行级**（`computeParents_fromRow`/`computeSupports_fromRow`/`computeNvSubtree`），存成 `_fromRow`，分解时直接按行跳、无需反复换算。
+
+#### 3.5.2 DoF 级消去树怎么连（关键规则）
+
+把每个**多自由度关节内部的行**也串成链：
+
+- **关节内部**：行 $r+1$ 的父 = 行 $r$（关节自己的几个 DoF 顺次相连）；
+- **跨关节**：一个关节的**第一行**，其父 = **父关节的最后一行**。
+
+于是关节级的树被细化成一棵 DoF 级的树（多自由度关节摊成 DoF 链）。
+
+#### 3.5.3 一个例子
+
+Model：`universe(0) → FreeFlyer(1)[行 0–5] → RX(2)[行 6] → RX(3)[行 7]`，另一支 `RX(2) → RX(4)[行 8]`。
+
+**关节级**：`parents = [_, 0, 1, 2, 2]`。**行级** `parents_fromRow`（行 0..8）：
+
+| 行 $k$ | 属于 | `parents_fromRow[k]` | 说明 |
+|--------|------|:---:|------|
+| 0 | FF | **−1** | 根（FF 父是 universe，无 DoF） |
+| 1–5 | FF | 0,1,2,3,4 | 关节内顺次相连 |
+| 6 | RX(2) | **5** | 首行 → 父关节(FF) 的**最后一行** |
+| 7 | RX(3) | 6 | 父关节 RX(2) 的行 |
+| 8 | RX(4) | **6** | 也挂 RX(2)，故也指 6（分叉） |
+
+$$\texttt{parents\_fromRow}=[\,-1,0,1,2,3,4,5,6,6\,]$$
+
+行 7、8 都指向 6，就是分叉在**行级**的体现。相应地：`nvSubtree_fromRow[6]=3`（行 6,7,8）；`supports_fromRow[7]=`行 0..7；`start/end_idx_v_fromRow[6]=[6,8]`（子树连续行区间）。这几个字段就是 [§2.4](#24-树拓扑深入parents--children--supports--subtrees) 的 `subtrees`/`supports` 的**行级翻版**。
+
+#### 3.5.4 Cholesky 怎么用它
+
+稀疏 $LDL^\top$ 处理第 $k$ 行时，$M$ 该行的非零列恰是 `supports_fromRow[k]`（祖先行）。算法**沿 `parents_fromRow` 逐行往上跳**：
+
+```cpp
+row = k;
+while (row != -1) { ...用 M 这一行更新... ; row = parents_fromRow[row]; }
+```
+
+每行只碰它那条链上的祖先，把稠密 $O(n^3)$ 的 Cholesky 降到与**树深**成正比（Featherstone 稀疏分解精髓）；`start/end_idx_v_fromRow` 用来按连续行区间做块操作。
+
+#### 3.5.5 mimic 的一分为二
+
+有 mimic 关节时，`parents_fromRow` 被拆成 `mimic_parents_fromRow` + `non_mimic_parents_fromRow`——一条支撑链拆成"mimic 行链"和"非 mimic 行链"，供传动矩阵 $G$ 分别作用（见 [§9.2](#92-mimicjoint-mimichxx)）。**无 mimic 时三者一致**，可忽略这层。
+
+> **命名 "fromRow"**：数组**用行号（0..nv-1）索引**、返回该行的树信息；对比 `parents[i]` 用关节 id 索引、返回父关节。同一棵树，换把"尺子"量。这套结构也被 `checkData`（[check-data.hxx](../include/pinocchio/src/algorithm/check-data.hxx)）逐行校验其自洽性。
 
 ### 3.6 解析导数（RNEA/ABA 对 q,v,τ 的偏导）
 
