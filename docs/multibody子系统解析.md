@@ -509,6 +509,7 @@ for (每个仿真步) {
 
 > 📖 **专题**：`supports → extended_support → span_indexes_vector / sparsity_pattern_vector` 四者关系、构建过程、完整实例见 [雅可比稀疏模式解析.md](雅可比稀疏模式解析.md)。下面是要点摘录。
 
+
 | 字段                         | 形式                                | 本例关节 5                            |
 | ---------------------------- | ----------------------------------- | ------------------------------------- |
 | `span_indexes_vector[i]`     | **非零列索引列表**（`vector<int>`） | 关节$\{1,2,4,5\}$ 的 $v$ 段索引拼起来 |
@@ -521,7 +522,9 @@ for (每个仿真步) {
 - **外层索引（行）= 关节 id** $i$：`sparsity_pattern_vector[i]` 是关节 $i$ 的掩码。
 - **内层索引（列）= `nv` 个速度自由度** $k$，即关节雅可比 $J_i\in\mathbb{R}^{6\times n_v}$ 的**第 $k$ 列**。
 
-$$\texttt{sparsity\_pattern\_vector}[i][k]=\texttt{true}\iff k\in\texttt{supports}[i]\text{ 的自由度}\iff J_i\text{ 第 }k\text{ 列可能非零}$$
+$$
+\texttt{sparsity\_pattern\_vector}[i][k]=\texttt{true}\iff k\in\texttt{supports}[i]\text{ 的自由度}\iff J_i\text{ 第 }k\text{ 列可能非零}
+$$
 
 > **注意不是 6×nv 的行列**：稀疏性按**整列**记——若 DoF $k$ 不在 $i$ 的支撑路径上，$J_i$ 第 $k$ 列的**全部 6 个空间行都为 0**，故记一个 `false`。twist 的 6 维被"压掉"，不细分。
 
@@ -535,18 +538,21 @@ for (祖先 jsupport ∈ supports[i] 去掉首尾)                        // 跳
 for (k = 0..joint_nv)         extended_support.push_back(joint_idx_v + k);  // 补自己
 ```
 
-| | `supports[j]` | `extended_support` |
-|---|---|---|
-| 元素含义 | **关节 id** | **速度列索引**（`idx_v` 那套） |
-| 长度 | 路径上关节数 | 那些关节的 **nv 之和**（= 非零列数） |
-| 含 universe | 含（首元 0） | 不含（nv=0，跳过） |
-| 空间 | 关节 id 空间 | 雅可比列空间 |
+
+|             | `supports[j]` | `extended_support`                  |
+| ----------- | ------------- | ----------------------------------- |
+| 元素含义    | **关节 id**   | **速度列索引**（`idx_v` 那套）      |
+| 长度        | 路径上关节数  | 那些关节的**nv 之和**（= 非零列数） |
+| 含 universe | 含（首元 0）  | 不含（nv=0，跳过）                  |
+| 空间        | 关节 id 空间  | 雅可比列空间                        |
 
 **例**（`universe(0) → FreeFlyer(1) → RX(2) → RX(3)`，列布局 FF=0–5、RX2=6、RX3=7）：关节 3 的 `supports[3]=[0,1,2,3]`（4 个关节 id），而 `extended_support=[0,1,2,3,4,5,6,7]`（8 个列索引）——因为浮动基一个关节就**展开成 6 列**。这正是"关节粒度 → 列粒度"的放大。构建完即存成 `span_indexes_vector[j]`（本体）与布尔化的 `sparsity_pattern_vector[j]`。
 
 三者是同一信息的三种形态：
 
-$$\underbrace{\texttt{supports}[j]}_{\text{关节 id 路径}}\ \xrightarrow{\text{按 idx\_v/nv 展开}}\ \underbrace{\texttt{extended\_support}}_{\text{列索引}}\ \Longrightarrow\ \begin{cases}\texttt{span\_indexes\_vector}[j]\ (\text{索引列表})\\ \texttt{sparsity\_pattern\_vector}[j]\ (\text{布尔掩码})\end{cases}$$
+$$
+\underbrace{\texttt{supports}[j]}_{\text{关节 id 路径}}\ \xrightarrow{\text{按 idx\_v/nv 展开}}\ \underbrace{\texttt{extended\_support}}_{\text{列索引}}\ \Longrightarrow\ \begin{cases}\texttt{span\_indexes\_vector}[j]\ (\text{索引列表})\\ \texttt{sparsity\_pattern\_vector}[j]\ (\text{布尔掩码})\end{cases}
+$$
 
 #### 2.5.3 使用示例：约束雅可比只算非零列
 
@@ -845,15 +851,16 @@ ModelTpl & operator=(const ModelTpl & other) {
 
 ### 3.5 稀疏 Cholesky（$M = U D U^\top$）与 `_fromRow` 索引
 
+
 | 字段                                                  | 含义                       |
 | ----------------------------------------------------- | -------------------------- |
 | `U`                                                   | 单位上三角因子             |
 | `D` / `Dinv`                                          | 对角块及其逆               |
 | `tmp`                                                 | 求解时的工作向量           |
-| `parents_fromRow[k]`                                  | 行$k$ 的"父行"（−1 为根）  |
+| `parents_fromRow[k]`                                  | 行$k$ 的"父行"（−1 为根） |
 | `nvSubtree_fromRow[k]`                                | 以行$k$ 为根的子树占几行   |
 | `supports_fromRow[k]`                                 | 行$k$ 的祖先行集（支撑）   |
-| `start_idx_v_fromRow` / `end_idx_v_fromRow`           | 子树的行区间 `[start,end]` |
+| `start_idx_v_fromRow` / `end_idx_v_fromRow`           | 子树的行区间`[start,end]`  |
 | `mimic_parents_fromRow` / `non_mimic_parents_fromRow` | mimic 场景下拆成的两条子链 |
 
 #### 3.5.1 `_fromRow` 到底是什么：把树从"关节视角"换成"自由度行视角"
@@ -883,15 +890,18 @@ Model：`universe(0) → FreeFlyer(1)[行 0–5] → RX(2)[行 6] → RX(3)[行 
 
 **关节级**：`parents = [_, 0, 1, 2, 2]`。**行级** `parents_fromRow`（行 0..8）：
 
-| 行 $k$ | 属于 | `parents_fromRow[k]` | 说明 |
-|--------|------|:---:|------|
-| 0 | FF | **−1** | 根（FF 父是 universe，无 DoF） |
-| 1–5 | FF | 0,1,2,3,4 | 关节内顺次相连 |
-| 6 | RX(2) | **5** | 首行 → 父关节(FF) 的**最后一行** |
-| 7 | RX(3) | 6 | 父关节 RX(2) 的行 |
-| 8 | RX(4) | **6** | 也挂 RX(2)，故也指 6（分叉） |
 
-$$\texttt{parents\_fromRow}=[\,-1,0,1,2,3,4,5,6,6\,]$$
+| 行$k$ | 属于  | `parents_fromRow[k]` | 说明                              |
+| ----- | ----- | :------------------: | --------------------------------- |
+| 0     | FF    |       **−1**       | 根（FF 父是 universe，无 DoF）    |
+| 1–5  | FF    |      0,1,2,3,4      | 关节内顺次相连                    |
+| 6     | RX(2) |        **5**        | 首行 → 父关节(FF) 的**最后一行** |
+| 7     | RX(3) |          6          | 父关节 RX(2) 的行                 |
+| 8     | RX(4) |        **6**        | 也挂 RX(2)，故也指 6（分叉）      |
+
+$$
+\texttt{parents\_fromRow}=[\,-1,0,1,2,3,4,5,6,6\,]
+$$
 
 行 7、8 都指向 6，就是分叉在**行级**的体现。相应地：`nvSubtree_fromRow[6]=3`（行 6,7,8）；`supports_fromRow[7]=`行 0..7；`start/end_idx_v_fromRow[6]=[6,8]`（子树连续行区间）。这几个字段就是 [§2.4](#24-树拓扑深入parents--children--supports--subtrees) 的 `subtrees`/`supports` 的**行级翻版**。
 
@@ -1003,7 +1013,9 @@ const FrameType & type = (FrameType)(JOINT | FIXED_JOINT | BODY | OP_FRAME | SEN
 
 五种类型**在运动学上完全等价**，位姿一律由
 
-$$^oM_f = {}^oM_i \cdot \texttt{placement}\qquad(i = \texttt{parentJoint})$$
+$$
+^oM_f = {}^oM_i \cdot \texttt{placement}\qquad(i = \texttt{parentJoint})
+$$
 
 算出。`type` 不影响任何公式，它纯粹是**语义标签 + 检索键**。
 唯一的例外是 `FIXED_JOINT` 会通过惯量并入间接影响动力学（见 4.3.3）。
@@ -1046,16 +1058,19 @@ if (append_inertia)
 
 `placement` 是 ${}^iM_f$。`InertiaTpl` 存的是紧凑三元组 $(m,\,c,\,I_c)$，所以变换写成：
 
-| 分量 | 公式 | 说明 |
-|---|---|---|
-| 质量 | $m_i = m_f$ | 标量，与坐标系无关 |
-| 杆臂 | $c_i = p + R\,c_f$ | 质心当作一个**点**做刚体变换 |
-| 转动惯量 | $I_{c,i} = R\,I_{c,f}\,R^\top$ | **只旋转不平移** |
+
+| 分量     | 公式                           | 说明                         |
+| -------- | ------------------------------ | ---------------------------- |
+| 质量     | $m_i = m_f$                    | 标量，与坐标系无关           |
+| 杆臂     | $c_i = p + R\,c_f$             | 质心当作一个**点**做刚体变换 |
+| 转动惯量 | $I_{c,i} = R\,I_{c,f}\,R^\top$ | **只旋转不平移**             |
 
 之所以看不到平行轴定理，是因为 $I_c$ 定义在质心处，质心搬到哪儿已由 $c$ 记录。
 平行轴项 $-m[c]_\times^2$ 要到展开成 $6\times6$ 时才出现：
 
-$$Y_{6\times6}=\begin{bmatrix} m\,\mathbb{1}_3 & -m[c]_\times \\ m[c]_\times & I_c-m[c]_\times^2\end{bmatrix}$$
+$$
+Y_{6\times6}=\begin{bmatrix} m\,\mathbb{1}_3 & -m[c]_\times \\ m[c]_\times & I_c-m[c]_\times^2\end{bmatrix}
+$$
 
 等价的 $6\times6$ 形式是余伴随合同变换 ${}^{i}Y={}^{i}X_f^{*}\,{}^{f}Y\,{}^{f}X_i$。
 **紧凑表示把平行轴项推迟到最后一刻**，这是 Pinocchio 惯量运算快的原因之一。
@@ -1063,8 +1078,10 @@ $$Y_{6\times6}=\begin{bmatrix} m\,\mathbb{1}_3 & -m[c]_\times \\ m[c]_\times & I
 
 **② `+=` —— 复合刚体**
 
-$$m_{ab}=m_a+m_b,\qquad c_{ab}=\frac{m_ac_a+m_bc_b}{m_{ab}},\qquad
-I_{ab}=I_a+I_b-\frac{m_am_b}{m_{ab}}\big[c_a-c_b\big]_\times^2$$
+$$
+m_{ab}=m_a+m_b,\qquad c_{ab}=\frac{m_ac_a+m_bc_b}{m_{ab}},\qquad
+I_{ab}=I_a+I_b-\frac{m_am_b}{m_{ab}}\big[c_a-c_b\big]_\times^2
+$$
 
 末项系数 $\mu=\dfrac{m_am_b}{m_a+m_b}$ 是**约化质量**。由于 pinocchio 的约定
 $[v]_\times^2=vv^\top-\|v\|^2\mathbb{1}$，减去它等于**加上**一个半正定量——
@@ -1121,13 +1138,14 @@ IMU、力矩传感器、相机等传感器元件的安装位姿，目前只有 g
 
 #### 4.3.7 对照表
 
-| 类型 | 典型来源 | 带惯量？ | 影响动力学？ | 你会主动建吗 |
-|---|---|---|---|---|
-| `JOINT` | `addJointFrame` | 否 | 否 | 建模时紧跟 `addJoint` |
-| `FIXED_JOINT` | URDF fixed 关节、`buildReducedModel`、universe | **是** | **是**（惯量并入父关节） | 很少 |
-| `BODY` | `addBodyFrame`、URDF link | 否（API 建的） | 否 | 偶尔 |
-| `OP_FRAME` | 用户代码、MJCF `<site>` | 否 | 否 | **最常用** |
-| `SENSOR` | graph 解析器 | 否 | 否 | 很少 |
+
+| 类型          | 典型来源                                       | 带惯量？       | 影响动力学？             | 你会主动建吗         |
+| ------------- | ---------------------------------------------- | -------------- | ------------------------ | -------------------- |
+| `JOINT`       | `addJointFrame`                                | 否             | 否                       | 建模时紧跟`addJoint` |
+| `FIXED_JOINT` | URDF fixed 关节、`buildReducedModel`、universe | **是**         | **是**（惯量并入父关节） | 很少                 |
+| `BODY`        | `addBodyFrame`、URDF link                      | 否（API 建的） | 否                       | 偶尔                 |
+| `OP_FRAME`    | 用户代码、MJCF`<site>`                         | 否             | 否                       | **最常用**           |
+| `SENSOR`      | graph 解析器                                   | 否             | 否                       | 很少                 |
 
 #### 4.3.8 两个实用提醒
 
@@ -1137,6 +1155,7 @@ IMU、力矩传感器、相机等传感器元件的安装位姿，目前只有 g
    ```cpp
    (fm->type != FIXED_JOINT && fm->type != JOINT)   // 跳过关节类帧
    ```
+
    用掩码写更直接：`fm->type & (JOINT | FIXED_JOINT)`。
 
 ### 4.4 Frame vs Joint：最常见的困惑
@@ -1727,6 +1746,39 @@ $$
 
 **⑤ 元信息**：`nq()`、`nv()`、`name()`、`neutral()`、`operator==`。
 
+#### 10.2.1 专题：`integrateCoeffWiseJacobian`（配置系数对切向量的导数 = 切映射 $T(q)$）
+
+它求 `integrate` 在**零点**对切向量的导数——一个 **$n_q\times n_v$ 矩阵**，正是 [IK 解析 §4](逆运动学IK解析.md) 里说的**切映射 $T(q)$**：
+
+$$J=\left.\frac{\partial\,(q\oplus v)}{\partial v}\right|_{v=0}\in\mathbb{R}^{n_q\times n_v},\qquad \dot q_{\text{config}}=T(q)\,v$$
+
+**"CoeffWise（逐系数）"** = 对配置向量的**每个分量（$n_q$ 个）** 求导，故是 $n_q\times n_v$（行=配置分量、列=切自由度），而**不是**切空间内部的 $n_v\times n_v$。
+
+**与 `dIntegrate` 的关键区别**：
+
+| | `integrateCoeffWiseJacobian(q, J)` | `dIntegrate_dv(q, v, J)` |
+|---|---|---|
+| 输出维度 | **$n_q\times n_v$** | $n_v\times n_v$ |
+| 求导对象 | 原始**配置分量**（含四元数等冗余表示） | 切空间里的量 |
+| 几何含义 | 切映射 $T(q)$：切向量 → 配置分量变化 | Jexp 类：切扰动 → 切扰动（群内部） |
+| 典型用途 | 喂**外部优化器**（在原始 $q$ 上工作） | Pinocchio 内部解析梯度 |
+
+**为什么存在**：像 **Ceres** 这类优化器在**原始配置向量**（$n_q$ 个数、带四元数）上迭代，但更新走流形 $q\oplus\delta$。它的 `Manifold`/`LocalParameterization` 需要 **"plus Jacobian"** $=\partial(q\oplus\delta)/\partial\delta|_{\delta=0}$——正是这个矩阵，好把 $n_v$ 维梯度正确映到 $n_q$ 配置上、且**不把四元数拉出流形**。
+
+**例子**：
+
+- **向量空间 $\mathbb{R}^n$**：$q\oplus v=q+v$ → $J=I_{n_v}$。
+- **SO(3)**（`special-orthogonal.hxx`）：配置=四元数($n_q=4$)、切=$\omega$($n_v=3$)，$q\oplus\omega=\text{quat}\cdot\exp_3(\omega)$ → $J$ 是 **$4\times3$**，本质是四元数运动学 $\dot{\mathbf q}=\tfrac12\mathbf q\otimes\omega$ 的映射。实现走链式（代码 502-533 行）：
+
+  ```cpp
+  v = log3(quat, θ);                     // 当前旋转向量
+  Jexp3CoeffWise(v, Jexp3QuatCoeffWise); // ∂(四元数分量)/∂v，4×3
+  Jlog3(θ, v, Jlog);                     // ∂v/∂(切扰动)，3×3
+  J = ± Jexp3QuatCoeffWise * Jlog;       // 链式 = 4×3；± 来自四元数 q/−q 同旋转、log3 翻号
+  ```
+
+> **与 `tangentMap` 的关系**：§10.2 ④ 的 `tangentMap(q, TM)` 是同一个 $n_q\times n_v$ 切映射的"新命名/矩阵版"，`tangentMapProduct` 则是免构造矩阵的乘积形式。二者都在表达 $\dot q_{\text{config}}=T(q)\,v$——这也是为什么更新位形必须 `integrate` 而非 $q+v$（见 §2.2.2、[IK 解析 §4](逆运动学IK解析.md)）。
+
 ### 10.3 三种基础群 + 笛卡尔积
 
 
@@ -1918,7 +1970,7 @@ for each frame f:
 | `data.J` 为什么列数不等于 `nv` | `model.hxx`+`jacobian.hxx`（§9.2）                       | `nvExtended`、`idx_vExtendeds`、`idx_vExtended_to_idx_v_fromRow`                |
 | 某算法的中间量存哪             | `data.hxx`                                                | `DataTpl` 对应字段（grep 字段名到 algorithm/）                                  |
 | 坐标系 vs 关节                 | `frame.hxx`,`model-item.hxx`                              | `FrameTpl`，`FrameType`，`oMf=oMi·placement`                                   |
-| 五种 `FrameType` 的区别 | `frame.hxx`（§4.3） | 只有 `FIXED_JOINT` 影响动力学（惯量并入父关节）；日常自定义用 `OP_FRAME` |
+| 五种`FrameType` 的区别         | `frame.hxx`（§4.3）                                      | 只有`FIXED_JOINT` 影响动力学（惯量并入父关节）；日常自定义用 `OP_FRAME`         |
 | 加新关节类型                   | `joint/joint-xxx.hxx` + `joint-collection.hxx`            | 仿 revolute 写 Model/Data/Constraint/Motion/Transform                           |
 | 关节允许的运动方向             | `joint-motion-subspace-*.hxx`                             | $v=S\dot q$，$\tau=S^\top f$                                                    |
 | 关节怎么把 q 变成位姿          | 各关节`calc`                                              | `data.M`，`data.S`，`data.v`                                                    |
