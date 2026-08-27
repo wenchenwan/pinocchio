@@ -53,7 +53,7 @@ Pinocchio 分三大层：
 |                | `data.hxx`                                               | `DataTpl`：所有算法的中间量缓存（~150 个字段）                                                                                         |
 |                | `frame.hxx`                                              | `FrameTpl` + `FrameType` 枚举（OP_FRAME/JOINT/FIXED_JOINT/BODY/SENSOR）                                                                |
 |                | `model-item.hxx`                                         | `ModelItem`：`Frame` 等树节点的公共基类（name/parentJoint/parentFrame/placement）                                                      |
-|                | `force-set.hxx`                                          | 力集合/运动集合的批量列操作辅助                                                                                                        |
+|                | `force-set.hxx`                                          | `ForceSetTpl`：一批空间力（wrench）的容器 + 批量对偶变换（CRBA 用，见 §12.3）                                                          |
 | **关节基类**   | `joint/joint-model-base.hxx`                             | `JointModelBase<Derived>`（CRTP）+ 一大套 `PINOCCHIO_JOINT_*` 宏、索引访问器、段/列/块选择器                                           |
 |                | `joint/joint-data-base.hxx`                              | `JointDataBase<Derived>`（CRTP）+ 访问器宏                                                                                             |
 |                | `joint/joint-collection.hxx`                             | `JointCollectionDefaultTpl`：关节"菜单" → `JointModelVariant`/`JointDataVariant`                                                      |
@@ -1919,12 +1919,45 @@ MyStep::run(model.joints[i], data.joints[i], MyStep::ArgsType(model, data, ...))
 **价值**：不依赖任何 URDF 文件即可跑通全部算法 —— 单元测试、基准测试、
 以及本文档所有数值验证都用它（实测样例人形：`nq=35, nv=34, njoints=30, nframes=70`）。
 
-### 12.3 `force-set.hxx`
+### 12.3 `force-set.hxx`：`ForceSetTpl` —— 一批空间力的批量容器与对偶变换
 
-对**一批** Force / Motion（存成 $6\times N$ 矩阵，每列一个）做批量变换的辅助。
-与 [空间代数 §act-on-set](空间代数运算解析.md) 是同一套思路：
-把公共部分（取 $R$、算 $\hat t$）提到循环外，让 Eigen 对整块矩阵向量化，
-远快于逐列调用。雅可比的参考系转换即依赖它。
+`ForceSetTpl` 是**N 个空间力（wrench）的容器**，是单个 `Force` 及其对偶变换的**批量/矩阵版**，主要给 CRBA 内部用。
+
+#### 12.3.1 存储：两个 3×N，而非一个 6×N
+
+```cpp
+private:
+  int size;             // 力的个数 N（= 列数）
+  Matrix3x m_f, m_n;    // 各 3×N：m_f = 所有力的【线性部分】，m_n = 【角部分】
+```
+
+一个空间力 = 6 维 =（线性力 $f$；力矩 $\tau$）。`ForceSet` 装 N 个，第 $k$ 列 = $(m\_f_{:,k};\ m\_n_{:,k})\in\mathbb{R}^6$。
+
+> **为什么拆成两个 3×N**：空间力的坐标变换是**分块**的（旋转作用线性、旋转+skew 耦合作用角）。线性/角分开存，变换公式能直接作用于 3×N 块、不必反复切 6×N。与单个 `Force` 分开存 linear/angular 同理（[空间代数 §1.4](空间代数运算解析.md)）。`matrix()` 才把它拼成稠密 $6\times N$（上 3 行线性、下 3 行角）供互操作。
+
+#### 12.3.2 核心：批量 SE3 对偶力变换（`Force::se3Action` 的向量化版）
+
+**`se3Action(m)`**（把 N 个力从 b 系搬到 a 系，余伴随 $\mathrm{Ad}^*$，见 [空间代数 §4.2](空间代数运算解析.md)）：
+
+```cpp
+Matrix3x Rf = m.rotation() * linear();                     // Rf = R·f（一次转完所有线性部分）
+return ForceSetTpl(Rf, skew(m.translation()) * Rf          // 新角 = p×(Rf) + R·τ
+                     + m.rotation() * angular());
+```
+
+$$af=\begin{bmatrix}R\,f\\ p\times(Rf)+R\,\tau\end{bmatrix}\quad(\text{对每列同时做})$$
+
+**`se3ActionInverse(m)`**：$bf=\begin{bmatrix}R^\top f\\ R^\top(\tau-p\times f)\end{bmatrix}$。二者就是把单个力的公式**向量化到 N 列**——公共部分（$R$、$\hat p$）提到循环外，Eigen 对整块矩阵向量化，远快于逐列。
+
+#### 12.3.3 `Block`：列区间的零拷贝读写视图
+
+`block(idx, len)` 返回对 `[idx, idx+len)` 这几列的**引用视图**（不拷贝）：`linear()`/`angular()` 给 3×len 子块（可读写）；`operator=`（三重载）从另一 `ForceSet`/`Block`/6×N 矩阵**写回**这段列；`se3Action` 只变换这一段。用途：CRBA 里每个关节占 force set 的**一段列**，用 Block 即可"取某关节那几列、就地变换/写回"。
+
+#### 12.3.4 为什么存在：CRBA 的"每自由度一个力"
+
+文件注释点出用途（"CRBA joint operators"）：$YS$（复合惯量 × 运动子空间）产生一个 **force set**（$6\times n_v$，每个自由度一列力）；$S^\top(YS)$ 把它投回关节空间得到**质量矩阵块** $M_{ij}=S_i^\top Y_{\text{comp}} S_j$；力沿树往根传时用 `se3Action` 批量换系。`Data.Fcrb[i]` 就是这种 force set（[§3.3](#33-质量矩阵与逆动力学)、CRBA 数学见 [空间代数 §6.3](空间代数运算解析.md)）。
+
+> **一句话**：`ForceSetTpl` = 一批 wrench（两个 3×N 存）+ 批量对偶变换（`Force::se3Action` 的向量化）+ 列区间视图 `Block`，是 CRBA 传播/投影"一组力"的核心数据结构。
 
 ---
 
