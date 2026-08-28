@@ -121,6 +121,7 @@ namespace pinocchio
       return *this;
     }
 
+    // mimic比例系数生效的地方，懒加载
     template<typename VectorLike>
     JointMotion __mult__(const Eigen::MatrixBase<VectorLike> & v) const
     {
