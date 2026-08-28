@@ -1360,12 +1360,87 @@ Pinocchio 的做法是给每类关节一个**专用 $S$ 类型**（如 `JointMot
 这套"把轴编码进类型"的手法与 [空间代数 §2](空间代数运算解析.md) 的 `CartesianAxis`/`SpatialAxis` 一脉相承，
 是 Pinocchio 单关节开销极低的微观原因。
 
-### 6.4 `JointMotionSubspaceBase` 与通用实现
+### 6.4 `JointMotionSubspaceBase<Derived>`：CRTP 接口层
 
-- `joint-motion-subspace-base.hxx`（191 行）：CRTP 基类，规定 $S$ 必须提供
-  `matrix()`、`motionAction()`、`se3Action()`、以及与 Force/Inertia 相乘的接口。
-- `joint-motion-subspace-generic.hxx`：`JointMotionSubspaceTpl` —— **稠密**的通用 $S$，
-  用于复合关节等无法静态确定稀疏模式的场合，或运行时才定维度的情形。
+[joint-motion-subspace-base.hxx](../include/pinocchio/src/multibody/joint-motion-subspace-base.hxx)（191 行）定义 $S$ 的**统一接口**。它**不存任何数据**，每个接口都转发给 `derived().XXX_impl()`（编译期解析、内联，零虚函数开销）：
+
+```cpp
+template<class Derived>
+class JointMotionSubspaceBase : public NumericalBase<Derived> {
+  Derived & derived() { return *static_cast<Derived*>(this); }   // CRTP 向下转型
+  template<typename V> JointMotion operator*(const V & vj) const
+  { return derived().__mult__(vj); }                             // S·q̇
+  ...
+};
+```
+
+| 接口（算法这样调用） | 转发到 | 数学 | 主要用在 |
+|---|---|---|---|
+| `operator*(vj)` [:68](../include/pinocchio/src/multibody/joint-motion-subspace-base.hxx#L68) | `__mult__(vj)` | $v_J=S\dot q$ | FK / RNEA / ABA **前向** $S\ddot q$ |
+| `transpose()` → `·f` | `derived().transpose()` | $\tau=S^\top f$ | RNEA / CRBA / ABA **后向** |
+| `matrix()` | `matrix_impl()` | 物化成 $6\times n_v$ 稠密阵 | 需要显式矩阵时 |
+| `se3Action(m)` [:114](../include/pinocchio/src/multibody/joint-motion-subspace-base.hxx#L114) | `derived().se3Action(m)` | ${}^oX_i\,S$ 变系 | jacobian、CRBA/ABA 世界系 |
+| `se3ActionInverse(m)` | 同上逆 | ${}^iX_o\,S$ | getJointJacobian LOCAL |
+| `motionAction(v)` | `derived().motionAction(v)` | $v\times S$ | $\dot J$、解析导数 |
+| `nv()` / `rows()` / `cols()` | `nv_impl()` / 恒 6 / nv | 维度 | 通用 |
+
+还定义三个**自由 `operator*`**（左乘，不属于 $S$ 自身）：
+
+```cpp
+Y * S            // 惯量 × 子空间 → 力集(6×nv)  —— CRBA 的 Y^c·S、ABA 的 I^A·S=U    :141
+Ymatrix * S      // 6×6 矩阵 × 子空间           —— ABA 世界系                        :150
+S_transpose * S  // Sᵀ·S → nv×nv 约简方阵       —— 关节空间惯量投影 D                :182
+```
+
+接口的返回类型全部经 `PINOCCHIO_CONSTRAINT_TYPEDEF_TPL` 宏从 `traits<Derived>` 取得——**基类不知道具体类型，却能声明正确的返回类型**，是 traits + CRTP 的标准配合（见 [§5.2](#52-crtp-基类静态多态零开销)）。
+
+### 6.5 `JointMotionSubspaceTpl`：通用稠密实现
+
+[joint-motion-subspace-generic.hxx](../include/pinocchio/src/multibody/joint-motion-subspace-generic.hxx)。这是"老实存矩阵、老实做矩阵乘"的 fallback 实现，通过 CRTP 把自己传回基类：
+
+```cpp
+template<int _Dim, typename _Scalar, int _Options, int _MaxDim>
+struct JointMotionSubspaceTpl
+: public JointMotionSubspaceBase<JointMotionSubspaceTpl<_Dim,...>> {  // ★ CRTP 自指
+  ...
+protected:
+  DenseBase S;    // ★ 真存一个 6×Dim 稠密矩阵
+};
+```
+
+各 `_impl` 就是直白的稠密运算：
+
+```cpp
+__mult__(vj)       { return JointMotion(S * vj); }              // S·q̇ = 矩阵×向量     :123
+Transpose::op*(f)  { return S.transpose() * f.toVector(); }     // Sᵀ·f                :138
+se3Action(m)       { motionSet::se3Action(m, S, res); }         // 逐列做 SE3 伴随      :188
+friend Y * S       { motionSet::inertiaAction(Y, S, res); }     // 惯量作用 → 力集      :170
+matrix_impl()      { return S; }                                //                      :156
+```
+
+`traits<JointMotionSubspaceTpl>`（[:19](../include/pinocchio/src/multibody/joint-motion-subspace-generic.hxx#L19)）声明关联类型：`JointMotion=MotionTpl`(6D)、`JointForce=`$\mathbb R^{Dim}$、`DenseBase=`$6\times Dim$、`ReducedSquaredMatrix=`$Dim\times Dim$。`Dim` 可为 `Eigen::Dynamic`（运行时定维）。
+
+### 6.6 全景：`Tpl` 只是 fallback，特化类型才是主力
+
+**关键：`JointMotionSubspaceTpl` 不是常用路径。** 大多数关节有**矩阵-free 的特化子空间类型**（§6.3 的动机），只有无特殊结构时才落到通用稠密实现：
+
+| 关节 | 子空间类型 | $S\dot q$ 怎么算 |
+|---|---|---|
+| 转动 / 平动 | `…SubspaceRevolute` / `Prismatic`（隐式，只记轴） | 缩放一个轴，**不乘矩阵** |
+| 自由飞行 free-flyer | 恒等 | $v_J=\dot q$ 直接 |
+| **mimic 仿从** | `ScaledJointMotionSubspaceTpl`（[§见 RNEA 解析 §7.2](逆动力学RNEA解析.md)） | 包一层 base 子空间 + 乘耦合倍率 $s$ |
+| **复合 / spherical-ZYX / 用户自定义** | **`JointMotionSubspaceTpl`（本类）** | 稠密 $S\cdot\dot q$ |
+
+所有这些类型**都继承同一个 `JointMotionSubspaceBase`、实现同一组 `_impl`**。于是算法只写一次：
+
+```cpp
+data.a[i] += jdata.S() * a_joint;          // S·q̈  —— 不管 S 是哪种实现
+tau_i      = jdata.S().transpose() * f[i]; // Sᵀ·f
+Ag_cols    = Y * jdata.S();                // 惯量作用
+J_cols     = oMi.act(jdata.S());           // se3Action 变系
+```
+
+同一行 `jdata.S() * a_joint`：对转动关节内联成"缩放一个轴"、对本类内联成"稠密矩阵乘"、对 mimic 内联成"乘倍率再乘"——**编译期各自展开成最优代码，运行期零分支零虚表**。这就是"上层递推公式对所有关节长得一样、差异全被 $S$ 吸收"（§6.1）在代码层面的落地，也是 Pinocchio 模板化零开销多态的又一处体现（[§5.2](#52-crtp-基类静态多态零开销)）。
 
 ---
 
