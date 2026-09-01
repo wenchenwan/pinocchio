@@ -1044,6 +1044,12 @@ $$
 
 ### 4.5 质量矩阵 CRBA
 
+> **深入**：本节讲原理。**按代码执行顺序逐行读完 `crbaLocalConvention` / `crbaWorldConvention`**
+> （驱动循环 → Pass 1 → Pass 2 普通/mimic 重载 → Pass 3 → 收尾），含 `nvSubtree` 的写入范围、
+> 底层原语（`Inertia::__mult__`、`SE3::act(Inertia)`、`forceSet::se3Action`、`motionSet::inertiaAction`）的真实算式、
+> 五关节分叉树的完整走查、质心动量收尾推导，以及耗时/内存实测——见
+> [docs/质量矩阵CRBA解析.md](docs/质量矩阵CRBA解析.md)。
+
 **目标**：计算广义质量矩阵 $M(q)\in\mathbb{R}^{n_v\times n_v}$。
 
 #### 4.5.1 从动能出发
