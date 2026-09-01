@@ -302,11 +302,15 @@ namespace pinocchio
         if (parent > 0)
         {
           /*   Yli += liXi Yi */
+          // 累加复合刚体惯量
           data.Ycrb[parent] += data.liMi[i].act(data.Ycrb[i]);
 
           /*   F[1:6,SUBTREE] = liXi F[1:6,SUBTREE] */
+          // 构建力-螺旋轴投影矩阵
           Block jF = data.Fcrb[parent].middleCols(jmodel.idx_v(), data.nvSubtree[i]);
           Block iF = data.Fcrb[i].middleCols(jmodel.idx_v(), data.nvSubtree[i]);
+
+          // 将当前iF中的每一列I_k * S_k都逐一变换到父关节坐标系下，得到jF
           forceSet::se3Action(data.liMi[i], iF, jF);
         }
       }
