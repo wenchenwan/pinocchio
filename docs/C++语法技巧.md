@@ -28,6 +28,7 @@
 15. [`ref_selector`：自动选择"引用类型"](#15-ref_selector自动选择引用类型)
 16. [用 traits 计算类型：运算返回类型/标量 + CRTP 基类委托](#16-用-traits-计算类型运算返回类型标量--crtp-基类委托)
 17. [用户自定义转换运算符 `operator T()`](#17-用户自定义转换运算符-operator-t)
+18. [块视图与零拷贝别名写入：`Block` / `Ref` / `ForceRef` 就地更新](#18-块视图与零拷贝别名写入block--ref--forceref-就地更新)
 
 ---
 
@@ -455,6 +456,55 @@ someFuncTakingMatrix6(Y);      // 传参自动转
 故 Pinocchio 内部高性能路径仍直接用 $(m,c,I_c)$ 分量算（见 [空间代数解析 §6](空间代数运算解析.md)），这个口子留给"确实需要显式矩阵"的场合（调试/外部线代库对接/公式验证）。可加 `explicit operator T()` 关掉隐式转换。
 
 **典型出现处**：`spatial/inertia.hxx` 的 `operator Matrix6()`。
+
+---
+
+## 18. 块视图与零拷贝别名写入：`Block` / `Ref` / `ForceRef` 就地更新
+
+**是什么**：`.col()`/`.middleCols()`/`.block()` 返回的 `Eigen::Block`、以及 `Eigen::Ref` / Pinocchio 的 `ForceRef`/`MotionRef`，都是**别名原内存的视图（不拷贝）**。对视图赋值 = **就地写进原矩阵的内存**。算法里"把结果写回某个大矩阵的一段"几乎都靠这个。
+
+**最小示例**：
+
+```cpp
+Eigen::MatrixXd M(6, 100);
+auto blk = M.middleCols(10, 4);   // Block：别名 M 第 10..13 列的存储，不复制
+blk.col(0) = someVec6;            // ← 直接写进 M(:,10) 的内存
+auto c = M.col(20);              // ColXpr：也是视图
+c += delta;                       // 就地累加到 M(:,20)
+```
+
+- `Block`/`ColXpr` 持有对 `M` 的引用 + 起始位置/长度，**读写都穿透到 `M`**。
+- 对比 §13 的 `.eval()`/`PlainObject`：那是**求值成拥有内存的新矩阵**（拷贝出来）；视图恰恰相反，**不拥有、只引用**。
+
+**把裸内存"看成"带语义的类型——`Ref`/`ForceRef`/`MotionRef`**：
+
+```cpp
+// act-on-set.hxx：把 6×N 力集的某一列（6 元裸向量）包成一个 Force 视图
+ForceRef<const Mat> fin (iF.col(col));   // 只读视图：前3=linear，后3=angular
+ForceRef<MatRet>    fout(jF.col(col));   // 可写视图：仍别名 jF 那一列的内存
+fout = m.act(fin);                        // ★ 变换结果就地写进 jF（进而是原矩阵）的内存
+```
+
+- `ForceRef`/`MotionRef` = "把一段连续 6 元内存**解释成** `Force`/`Motion`（含 `.linear()`/`.angular()` 语义）"的**零拷贝包装**，不分配、不复制。
+- `fout = expr` 因为 `fout` 是视图，赋值**逐元素写回它引用的内存**，无临时对象。配合 `Op` 标签可切换 `=`/`+=`/`-=`（SETTO/ADDTO/RMTO）。
+
+**在 Pinocchio 里为什么这么用**：动力学递推要反复"把一个 6×子树 的力/运动块变换后写进父节点的大矩阵某段"。用视图链
+
+```cpp
+// crba.hxx（LOCAL 约定 Pass2）：把子树力集变换到父系，就地写入 data.Fcrb[parent]
+Block jF = data.Fcrb[parent].middleCols(idx_v, nvSubtree[i]);  // 视图，别名父的存储
+Block iF = data.Fcrb[i].middleCols(idx_v, nvSubtree[i]);
+forceSet::se3Action(data.liMi[i], iF, jF);   // 逐列 fout=m.act(fin) 写穿到 Fcrb[parent]
+```
+
+**全程零拷贝、零分配**：`middleCols` 取视图 → 逐列 `ColXpr` 视图 → `ForceRef` 语义视图 → `fout = …` 就地写回。数据从头到尾只在 `Fcrb[]` 的存储里流动，没有中间缓冲。这正是 [CRBA §6.4](质量矩阵CRBA解析.md)、[RNEA](逆动力学RNEA解析.md)、[雅可比](雅可比计算解析.md) 等能在紧循环里高效跑的底层原因。
+
+**易错点**：
+- 视图**别名原内存**，故 `A.middleCols(...) = f(A.middleCols(...))` 若读写区间重叠可能出错——需要时用 `.eval()` 断开别名，或用 `noalias()`（§6）声明"不重叠"。
+- 视图**生命周期依附原矩阵**：原矩阵析构/扩容后视图悬垂。别把 `Block`/`Ref` 存起来跨作用域用。
+- `Ref<T>` 作参数能零拷贝接住块/`Map`/子矩阵（见 §6 `Eigen::Ref`），但要求内存布局兼容（连续/对齐），否则 Eigen 会**静默拷进临时量**，失去零拷贝。
+
+**典型出现处**：`spatial/act-on-set.hxx`（`forceSet::se3Action`/`motionSet::se3Action` 的逐列 `ForceRef`/`MotionRef` 写入）、`algorithm/crba.hxx`/`rnea.hxx`/`jacobian.hxx`（`jointCols`/`middleCols`/`block` 写回 `data.M`/`data.J`/`data.Fcrb`）。
 
 ---
 
