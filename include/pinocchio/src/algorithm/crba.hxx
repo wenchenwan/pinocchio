@@ -410,6 +410,11 @@ namespace pinocchio
         JointIndex sub_mimic_id = data.mimic_subtree_joint[mims_id];
         if (sub_mimic_id != 0)
         {
+          // jointRows 取 mimic 的行（因 idx_v 别名，实为主动关节那段行）
+          // middleCols 取 mimic 下游子树 sub_mimic_id 的列（是下游后代，不是被模仿关节！）
+
+          // 有 Mimic 时，主动关节的行除了自身对角贡献（前一步 jointBlock），
+          // 还要补上 mimic 与其下游真实DoF子树的耦合（耦合系数 r 已隐含在 S 的定义中）
           jmodel.jointRows(data.M)
             .middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[sub_mimic_id])
             .noalias() += jdata.S().transpose()

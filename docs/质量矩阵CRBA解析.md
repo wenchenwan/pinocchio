@@ -592,6 +592,14 @@ const_cast<ExpressionType &>(R) = jdata.S().transpose() * F;   // Op == SETTO
 
 `mims_idx_v == parent_idx` 时说明这个祖先**和 mimic 共用同一列**（祖先就是被模仿的那个关节，或另一个同主动的 mimic），此时 $M_{ps}$ 与 $M_{sp}$ 折叠到同一格，所以**加两次**——数学上的来历见 §11.2。
 
+**(e) `mims_id` 是序号，不是关节 id。** 驱动里 `Pass3::run(..., i)` 传的是**循环下标** `i`（[crba.hxx:485](../include/pinocchio/src/algorithm/crba.hxx#L485)），即"这是第几个 mimic"。它专门用来索引**和 `model.mimicking_joints` 平行的数组** `data.mimic_subtree_joint[mims_id]`（长度 = mimic 个数，非关节数）。真正的关节 id 是 `mimicking_id = jmodel.id() = model.mimicking_joints[mims_id]`，用于 `subtrees`/`supports`/`idx_vs`/`Fcrb` 等按关节 id 排的量。二者别混。
+
+**(f) `sub_mimic_id` 是 mimic 的下游后代，不是被模仿关节。** `data.mimic_subtree_joint[mims_id]` = 该 mimic **下游第一个"真实自由度"后代的关节 id**（官方原话 "first non mimic child"，[data.hxx:860](../include/pinocchio/src/multibody/data.hxx#L860)），没有则存哨兵 **0**（关节 0 是 universe，永不为后代，零歧义）。**它在下游（id 更大），与上游的被模仿主动关节方向相反**。之所以要单存这个句柄：mimic 自己的 `idx_v` 已被劫持指向主动关节，无法用它定位"mimic 自己下游子树"的列，只能靠 `sub_mimic_id` 拿到下游列的起点 `idx_vs[sub_mimic_id]` + 宽度 `nvSubtree[sub_mimic_id]`。
+
+> **第 ③ 步的物理意义**：填的是 $M[\text{主动关节},\ \text{mimic 下游后代}]$——**mimic 与它下游那截胳膊本是刚性串联、有惯性耦合的一对；但 mimic 没有独立账户，这份"mimic ↔ 下游"耦合按齿轮比 $r$ 折算、记到主动关节行上**。即"推下游关节时主动电机会感到的那份力矩"（反之亦然）。这里只带**一个** $r$（一端是 mimic、一端是真关节），对比第 ② 步两端都是 mimic 得 $r^2$。这份账 Pass 2 漏算了（mimic 那行被截断），故 Pass 3 补。
+
+> ⚠️ **已知假设 / 局限：mimic 下游须为单链。** 这步用的宽度是 `nvSubtree[sub_mimic_id]`（**第一棵**下游真子树），不是 `nvSubtree[mimicking_id]`（全部下游）。当 mimic 下游是**单棵子树**（单链，所有 `MimicTestCases` 与典型用法都如此）时二者相等、覆盖完整；但若 mimic **直接分叉成多棵下游真子树**，只有第一棵被填，其余分支的耦合会被漏掉——属**未测试/未支持的边界**。验证法：建"mimic 直接接两条链分叉"的模型，比对 `crba` 与 $G^\top M_{\text{full}}G$。
+
 ---
 
 ## 7. WORLD 约定实现：逐行读完 `crbaWorldConvention`
@@ -1029,6 +1037,41 @@ $$
   ```
 
   交叉项 $M_{ps}$ 与 $M_{sp}$ 对称，折叠到同一个上三角格子里就是**加两次**，因子 2 由此而来。
+
+#### 多个 mimic 跟随同一主动关节
+
+若主动关节 $p$ 被 $m$ 个 mimic 同时跟随（$s_1,\dots,s_m$，传动比 $r_1,\dots,r_m$），$G$ 主动那一列变成**所有 mimic 的和**：
+
+$$g_p = e_p + \sum_{k=1}^{m} r_k\,e_{s_k}$$
+
+代进二次型 $M_{pp}^{\text{red}}=g_p^\top M_{\text{ext}}\,g_p$，用 $e_a^\top M e_b=M_{ab}$ 与对称性展开，比单 mimic **多出一类项**：
+
+$$
+\boxed{\,M_{pp}^{\text{red}}
+=\underbrace{M_{pp}}_{\text{主动自己}}
++\underbrace{2\sum_k r_k M_{p,s_k}}_{\text{主动–mimic 交叉}}
++\underbrace{\sum_k r_k^2 M_{s_k s_k}}_{\text{各 mimic 反射}}
++\underbrace{2\!\sum_{k<l} r_k r_l\,M_{s_k s_l}}_{\textbf{mimic–mimic 交叉（新增）}}\,}
+$$
+
+**新增的 $2\sum_{k<l}r_kr_l M_{s_ks_l}$** 是两个 mimic 通过共享主动 DoF 产生的惯性交叉耦合。由分支诱导稀疏（§9.4），$M_{s_ks_l}\ne0$ **仅当一个 mimic 落在另一个的子树里（嵌套）**；两个 mimic 分处不同分支时该项为 0，退化为"各自独立反射"。
+
+**代码如何无特判地实现**：Pass 3 遍历 `model.mimicking_joints`（**所有** mimic），逐个处理、全程 `+=`；因每个 mimic 的 `idx_v` 都指向同一主动槽，贡献自然汇总。所有交叉项的**因子 2** 都由那句双加产生——注释说得很准：
+
+```cpp
+// check if support is either a mimic with the same primary or jmodel primary
+if (mims_idx_v == sup_idx_v)     // 支撑链祖先的列号 == 主动槽
+  data.M.block(...) += temp_JAG; // 再加一遍
+```
+
+处理 $s_k$ 沿支撑链上行时，祖先 `sup_idx_v == 主动槽` 恰有两种情形，正好对上两类因子 2：
+
+| 支撑链祖先是 | 贡献项 | 因子 2 来源 |
+|---|---|---|
+| **主动关节 $p$ 本身** | $2r_k M_{p,s_k}$ | $p$ 的 `idx_v` = 主动槽 |
+| **另一个同主动的 mimic $s_l$** | $2r_k r_l M_{s_k s_l}$ | $s_l$ 的 `idx_v` 也 = 主动槽 |
+
+即注释里"support 是**同主动的 mimic** 或**主动关节本身**就加两次"正是为多 mimic 而写：它同时补上了两类交叉项的对称第二份。§11.4 的 case 3/case 7（双 mimic）正是对此的数值验证。
 
 ### 11.3 于是"截断"是必然的
 

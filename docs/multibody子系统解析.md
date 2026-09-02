@@ -53,7 +53,7 @@ Pinocchio 分三大层：
 |                | `data.hxx`                                               | `DataTpl`：所有算法的中间量缓存（~150 个字段）                                                                                         |
 |                | `frame.hxx`                                              | `FrameTpl` + `FrameType` 枚举（OP_FRAME/JOINT/FIXED_JOINT/BODY/SENSOR）                                                                |
 |                | `model-item.hxx`                                         | `ModelItem`：`Frame` 等树节点的公共基类（name/parentJoint/parentFrame/placement）                                                      |
-|                | `force-set.hxx`                                          | `ForceSetTpl`：一批空间力（wrench）的容器 + 批量对偶变换（CRBA 用，见 §12.3）                                                          |
+|                | `force-set.hxx`                                          | `ForceSetTpl`：一批空间力（wrench）的容器 + 批量对偶变换（CRBA 用，见 §12.3）                                                         |
 | **关节基类**   | `joint/joint-model-base.hxx`                             | `JointModelBase<Derived>`（CRTP）+ 一大套 `PINOCCHIO_JOINT_*` 宏、索引访问器、段/列/块选择器                                           |
 |                | `joint/joint-data-base.hxx`                              | `JointDataBase<Derived>`（CRTP）+ 访问器宏                                                                                             |
 |                | `joint/joint-collection.hxx`                             | `JointCollectionDefaultTpl`：关节"菜单" → `JointModelVariant`/`JointDataVariant`                                                      |
@@ -126,7 +126,7 @@ parents[i]        jointPlacements[i]     inertias[i]      names[i]
 idx_qs[i]  nqs[i]     idx_vs[i]  nvs[i]      supports[i]     subtrees[i]  ...
 ```
 
-访问关节 $i$ 的父 = `parents[i]`，位姿 = `jointPlacements[i]`……**同一个 $i$ 横跨所有数组**。这是典型的 **SoA（Structure of Arrays）**而非 AoS（Array of Structures）。为什么这样设计：
+访问关节 $i$ 的父 = `parents[i]`，位姿 = `jointPlacements[i]`……**同一个 $i$ 横跨所有数组**。这是典型的 **SoA（Structure of Arrays）** 而非 AoS（Array of Structures）。为什么这样设计：
 
 1. **算法只碰它需要的那几个数组**：比如 forwardKinematics 递推只读 `parents`、`jointPlacements`、`joints`，写 `data.oMi`。SoA 下这几个数组在内存里**连续、紧凑**，遍历时缓存命中率高；AoS（每个关节一个大结构体）会把用不到的字段也拖进缓存行，浪费带宽。
 2. **维度数组能整体做向量运算**：`nq += joint_nq`、`upperEffortLimit` 是一整个 `VectorXs`，可以 `jointVelocitySelector` 取段、Eigen 批量运算。
@@ -1152,6 +1152,7 @@ IMU、力矩传感器、相机等传感器元件的安装位姿，目前只有 g
 1. **`getFrameId` 找不到时返回 `frames.size()`**（越界哨兵），不抛异常。
    掩码给窄了会静默拿到坏下标，务必先用 `existFrame` 校验。
 2. **筛选时按掩码分组，而非逐个判等**。真实消费者的写法如 `parsers/sdf/geometry.cpp:317`：
+
    ```cpp
    (fm->type != FIXED_JOINT && fm->type != JOINT)   // 跳过关节类帧
    ```
@@ -1374,15 +1375,16 @@ class JointMotionSubspaceBase : public NumericalBase<Derived> {
 };
 ```
 
-| 接口（算法这样调用） | 转发到 | 数学 | 主要用在 |
-|---|---|---|---|
-| `operator*(vj)` [:68](../include/pinocchio/src/multibody/joint-motion-subspace-base.hxx#L68) | `__mult__(vj)` | $v_J=S\dot q$ | FK / RNEA / ABA **前向** $S\ddot q$ |
-| `transpose()` → `·f` | `derived().transpose()` | $\tau=S^\top f$ | RNEA / CRBA / ABA **后向** |
-| `matrix()` | `matrix_impl()` | 物化成 $6\times n_v$ 稠密阵 | 需要显式矩阵时 |
-| `se3Action(m)` [:114](../include/pinocchio/src/multibody/joint-motion-subspace-base.hxx#L114) | `derived().se3Action(m)` | ${}^oX_i\,S$ 变系 | jacobian、CRBA/ABA 世界系 |
-| `se3ActionInverse(m)` | 同上逆 | ${}^iX_o\,S$ | getJointJacobian LOCAL |
-| `motionAction(v)` | `derived().motionAction(v)` | $v\times S$ | $\dot J$、解析导数 |
-| `nv()` / `rows()` / `cols()` | `nv_impl()` / 恒 6 / nv | 维度 | 通用 |
+
+| 接口（算法这样调用）                                                                          | 转发到                      | 数学                       | 主要用在                           |
+| --------------------------------------------------------------------------------------------- | --------------------------- | -------------------------- | ---------------------------------- |
+| `operator*(vj)` [:68](../include/pinocchio/src/multibody/joint-motion-subspace-base.hxx#L68)  | `__mult__(vj)`              | $v_J=S\dot q$              | FK / RNEA / ABA**前向** $S\ddot q$ |
+| `transpose()` → `·f`                                                                        | `derived().transpose()`     | $\tau=S^\top f$            | RNEA / CRBA / ABA**后向**          |
+| `matrix()`                                                                                    | `matrix_impl()`             | 物化成$6\times n_v$ 稠密阵 | 需要显式矩阵时                     |
+| `se3Action(m)` [:114](../include/pinocchio/src/multibody/joint-motion-subspace-base.hxx#L114) | `derived().se3Action(m)`    | ${}^oX_i\,S$ 变系          | jacobian、CRBA/ABA 世界系          |
+| `se3ActionInverse(m)`                                                                         | 同上逆                      | ${}^iX_o\,S$               | getJointJacobian LOCAL             |
+| `motionAction(v)`                                                                             | `derived().motionAction(v)` | $v\times S$                | $\dot J$、解析导数                 |
+| `nv()` / `rows()` / `cols()`                                                                  | `nv_impl()` / 恒 6 / nv     | 维度                       | 通用                               |
 
 还定义三个**自由 `operator*`**（左乘，不属于 $S$ 自身）：
 
@@ -1424,12 +1426,13 @@ matrix_impl()      { return S; }                                //              
 
 **关键：`JointMotionSubspaceTpl` 不是常用路径。** 大多数关节有**矩阵-free 的特化子空间类型**（§6.3 的动机），只有无特殊结构时才落到通用稠密实现：
 
-| 关节 | 子空间类型 | $S\dot q$ 怎么算 |
-|---|---|---|
-| 转动 / 平动 | `…SubspaceRevolute` / `Prismatic`（隐式，只记轴） | 缩放一个轴，**不乘矩阵** |
-| 自由飞行 free-flyer | 恒等 | $v_J=\dot q$ 直接 |
-| **mimic 仿从** | `ScaledJointMotionSubspaceTpl`（[§见 RNEA 解析 §7.2](逆动力学RNEA解析.md)） | 包一层 base 子空间 + 乘耦合倍率 $s$ |
-| **复合 / spherical-ZYX / 用户自定义** | **`JointMotionSubspaceTpl`（本类）** | 稠密 $S\cdot\dot q$ |
+
+| 关节                                  | 子空间类型                                                                    | $S\dot q$ 怎么算                   |
+| ------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------- |
+| 转动 / 平动                           | `…SubspaceRevolute` / `Prismatic`（隐式，只记轴）                            | 缩放一个轴，**不乘矩阵**           |
+| 自由飞行 free-flyer                   | 恒等                                                                          | $v_J=\dot q$ 直接                  |
+| **mimic 仿从**                        | `ScaledJointMotionSubspaceTpl`（[§见 RNEA 解析 §7.2](逆动力学RNEA解析.md)） | 包一层 base 子空间 + 乘耦合倍率$s$ |
+| **复合 / spherical-ZYX / 用户自定义** | **`JointMotionSubspaceTpl`（本类）**                                          | 稠密$S\cdot\dot q$                 |
 
 所有这些类型**都继承同一个 `JointMotionSubspaceBase`、实现同一组 `_impl`**。于是算法只写一次：
 
@@ -1825,18 +1828,21 @@ $$
 
 它求 `integrate` 在**零点**对切向量的导数——一个 **$n_q\times n_v$ 矩阵**，正是 [IK 解析 §4](逆运动学IK解析.md) 里说的**切映射 $T(q)$**：
 
-$$J=\left.\frac{\partial\,(q\oplus v)}{\partial v}\right|_{v=0}\in\mathbb{R}^{n_q\times n_v},\qquad \dot q_{\text{config}}=T(q)\,v$$
+$$
+J=\left.\frac{\partial\,(q\oplus v)}{\partial v}\right|_{v=0}\in\mathbb{R}^{n_q\times n_v},\qquad \dot q_{\text{config}}=T(q)\,v
+$$
 
 **"CoeffWise（逐系数）"** = 对配置向量的**每个分量（$n_q$ 个）** 求导，故是 $n_q\times n_v$（行=配置分量、列=切自由度），而**不是**切空间内部的 $n_v\times n_v$。
 
 **与 `dIntegrate` 的关键区别**：
 
-| | `integrateCoeffWiseJacobian(q, J)` | `dIntegrate_dv(q, v, J)` |
-|---|---|---|
-| 输出维度 | **$n_q\times n_v$** | $n_v\times n_v$ |
-| 求导对象 | 原始**配置分量**（含四元数等冗余表示） | 切空间里的量 |
-| 几何含义 | 切映射 $T(q)$：切向量 → 配置分量变化 | Jexp 类：切扰动 → 切扰动（群内部） |
-| 典型用途 | 喂**外部优化器**（在原始 $q$ 上工作） | Pinocchio 内部解析梯度 |
+
+|          | `integrateCoeffWiseJacobian(q, J)`     | `dIntegrate_dv(q, v, J)`            |
+| -------- | -------------------------------------- | ----------------------------------- |
+| 输出维度 | **$n_q\times n_v$**                    | $n_v\times n_v$                     |
+| 求导对象 | 原始**配置分量**（含四元数等冗余表示） | 切空间里的量                        |
+| 几何含义 | 切映射$T(q)$：切向量 → 配置分量变化   | Jexp 类：切扰动 → 切扰动（群内部） |
+| 典型用途 | 喂**外部优化器**（在原始 $q$ 上工作）  | Pinocchio 内部解析梯度              |
 
 **为什么存在**：像 **Ceres** 这类优化器在**原始配置向量**（$n_q$ 个数、带四元数）上迭代，但更新走流形 $q\oplus\delta$。它的 `Manifold`/`LocalParameterization` 需要 **"plus Jacobian"** $=\partial(q\oplus\delta)/\partial\delta|_{\delta=0}$——正是这个矩阵，好把 $n_v$ 维梯度正确映到 $n_q$ 配置上、且**不把四元数拉出流形**。
 
@@ -2020,7 +2026,9 @@ return ForceSetTpl(Rf, skew(m.translation()) * Rf          // 新角 = p×(Rf) +
                      + m.rotation() * angular());
 ```
 
-$$af=\begin{bmatrix}R\,f\\ p\times(Rf)+R\,\tau\end{bmatrix}\quad(\text{对每列同时做})$$
+$$
+af=\begin{bmatrix}R\,f\\ p\times(Rf)+R\,\tau\end{bmatrix}\quad(\text{对每列同时做})
+$$
 
 **`se3ActionInverse(m)`**：$bf=\begin{bmatrix}R^\top f\\ R^\top(\tau-p\times f)\end{bmatrix}$。二者就是把单个力的公式**向量化到 N 列**——公共部分（$R$、$\hat p$）提到循环外，Eigen 对整块矩阵向量化，远快于逐列。
 
