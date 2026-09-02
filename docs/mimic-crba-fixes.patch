@@ -1,0 +1,65 @@
+diff --git a/include/pinocchio/src/algorithm/crba.hxx b/include/pinocchio/src/algorithm/crba.hxx
+index 9abd504ac..d52e0430d 100644
+--- a/include/pinocchio/src/algorithm/crba.hxx
++++ b/include/pinocchio/src/algorithm/crba.hxx
+@@ -169,11 +169,14 @@ namespace pinocchio
+         // Compute for the "subtree" of the mimicking
+         JointIndex sub_mimic_id = data.mimic_subtree_joint[mims_id];
+         if (sub_mimic_id != 0)
++          // sub_mimic_id 表示mimic关节的下游子树中第一个非mimic关节的id
++          // 考虑sub_mimic_id所对应的关节的惯性力也会通过逆动力学效应耦合回到mimic关节
++          // 在质量矩阵中，这表现为 M[行=mimic, 列=B] 的非零块
+           jmodel.jointRows(data.M)
+-            .middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[sub_mimic_id])
++            .middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[mimicking_id])
+             .noalias() +=
+             J_cols.transpose()
+-            * data.Ag.middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[sub_mimic_id]);
++            * data.Ag.middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[mimicking_id]);
+ 
+         const auto & supports = model.supports[mimicking_id];
+         size_t j = supports.size() - 2;
+@@ -197,13 +200,13 @@ namespace pinocchio
+           if (sup_idx_v >= mims_idx_v)
+           {
+             data.M.block(mims_idx_v, sup_idx_v, mims_nvExtended, sup_nvExtended).noalias() +=
+-              temp_JAG;
++              temp_JAG.transpose();
+ 
+             // check if support is either a mimic with the same primary or jmodel primary to add
+             // temp_JAG a second time
+             if (mims_idx_v == sup_idx_v)
+               data.M.block(mims_idx_v, sup_idx_v, mims_nvExtended, sup_nvExtended).noalias() +=
+-                temp_JAG;
++                temp_JAG.transpose();
+           }
+           else // Fill column
+           {
+@@ -416,9 +419,9 @@ namespace pinocchio
+           // 有 Mimic 时，主动关节的行除了自身对角贡献（前一步 jointBlock），
+           // 还要补上 mimic 与其下游真实DoF子树的耦合（耦合系数 r 已隐含在 S 的定义中）
+           jmodel.jointRows(data.M)
+-            .middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[sub_mimic_id])
++            .middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[mimicking_id])
+             .noalias() += jdata.S().transpose()
+-                          * F.middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[sub_mimic_id]);
++                          * F.middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[mimicking_id]);
+         }
+ 
+         const auto & supports = model.supports[mimicking_id];
+@@ -444,13 +447,13 @@ namespace pinocchio
+           if (parent_idx >= mims_idx_v)
+           {
+             data.M.block(mims_idx_v, parent_idx, mims_nvExtended, model.nvExtendeds[li])
+-              .noalias() += temp_JAG;
++              .noalias() += temp_JAG.transpose();
+ 
+             // check if support is either a mimic with the same primary or jmodel primary to add
+             // temp_JAG a second time
+             if (mims_idx_v == parent_idx)
+               data.M.block(mims_idx_v, parent_idx, mims_nvExtended, model.nvExtendeds[li])
+-                .noalias() += temp_JAG;
++                .noalias() += temp_JAG.transpose();
+           }
+           else // Fill column
+           {

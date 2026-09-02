@@ -34,13 +34,14 @@
   - [7.2 Pass 1](#72-pass-1crbaworldconventionforwardstep)
   - [7.3 Pass 2（普通关节）：从四步减到三步](#73-pass-2普通关节从四步减到三步)
   - [7.4 Pass 2（mimic 关节）：只剩一行](#74-pass-2mimic-关节只剩一行)
-  - [7.5 Pass 3](#75-pass-3crbaworldconventionmimicstep)
+  - [7.5 Pass 3（含支撑链循环逐句拆解）](#75-pass-3crbaworldconventionmimicstep)
   - [7.6 收尾那 6 行：质心动量矩阵](#76-收尾那-6-行质心动量矩阵是怎么顺带算出来的)
 - [8. 两种约定对比：差异到底在哪](#8-两种约定对比差异到底在哪)
   - [8.1 实测数据：耗时、内存与一致性](#81-实测数据耗时内存与一致性)
 - [9. 上三角、`nvSubtree` 与紧凑树要求（`CRBAChecker`）](#9-上三角nvsubtree-与紧凑树要求crbachecker)
 - [10. `armature`：转子惯量](#10-armature转子惯量)
 - [11. mimic 关节：为什么要拆成"截断 + 补账"](#11-mimic-关节为什么要拆成截断--补账)
+  - [11.6 两个已发现的缺陷（实测）](#116-两个已发现的缺陷阅读源码时实测所得)
 - [12. 与 $A_g$、ABA、Cholesky 的关系](#12-与-a_gabacholesky-的关系)
 - [13. 复杂度](#13-复杂度)
 - [14. 一句话总结](#14-一句话总结)
@@ -813,6 +814,82 @@ motionSet::inertiaAction<ADDTO>(data.oYcrb[mimicking_id], J_cols, jmodel.jointCo
 
 **第 ⑤ 步是 LOCAL 完全没有的**：mimic 也会影响质心动量，得把 $Y^c_{\text{mim}}\cdot S_{\text{mim}}$ 用 `ADDTO` 累加回主动关节在 `data.Ag` 里的那一列，否则 §7.6 算出的 $A_g$ 会漏掉 mimic 的贡献。
 
+#### 支撑链循环（第 ④ 步）逐句拆解
+
+这段是 Pass 3 里最难读的一块，单独展开。完整代码（[crba.hxx:181](../include/pinocchio/src/algorithm/crba.hxx#L181)）：
+
+```cpp
+const auto & supports = model.supports[mimicking_id];   // = {0, ..., λ(m), m}
+size_t j = supports.size() - 2;                         // 起点 = mimic 的父
+
+int mims_idx_v      = model.idx_vs[mimicking_id];       // = 主动关节的列号
+int mims_nvExtended = model.nvExtendeds[mimicking_id];
+
+for (; j > 0; j--)                                      // j=0 是 universe，不处理
+{
+  int sup_idx_v         = model.idx_vs[supports[j]];          // 写 M 用（真实列）
+  int sup_idx_vExtended = model.idx_vExtendeds[supports[j]];  // 读 J 用（扩展列）
+  int sup_nvExtended    = model.nvExtendeds[supports[j]];
+
+  temp_JAG.noalias() =
+    data.J.middleCols(sup_idx_vExtended, sup_nvExtended).transpose() * Ag_sec;
+
+  if (sup_idx_v >= mims_idx_v)          // ── 填行
+  {
+    data.M.block(mims_idx_v, sup_idx_v, mims_nvExtended, sup_nvExtended) += temp_JAG;
+    if (mims_idx_v == sup_idx_v)        // ── 同列 → 再加一次
+      data.M.block(mims_idx_v, sup_idx_v, mims_nvExtended, sup_nvExtended) += temp_JAG;
+  }
+  else                                   // ── 填列
+  {
+    data.M.block(sup_idx_v, mims_idx_v, sup_nvExtended, mims_nvExtended) += temp_JAG;
+  }
+}
+```
+
+**(a) 循环在遍历什么。**
+`model.supports[i]` 是**从 universe 到关节 $i$ 的完整路径**，首元素恒为 0、末元素恒为 $i$（实测 `supports[3] = {0,1,2,3}`）。
+所以 `j = size-2` 是 mimic 的父，`j-- ... j > 0` 就是**从 mimic 的父一路向上走到根的下一级**。
+每一轮处理一个祖先 $li$ = `supports[j]`。
+
+**(b) `temp_JAG` 是什么。**
+`Ag_sec` 在 Pass 3 开头算好（第 ① 步），是 mimic 自己的力集 $Y^c_m\cdot(r\,{}^oX_mS_m)$，$6\times n_{v\text{Ext}}(m)$。
+于是
+
+$$\texttt{temp\_JAG} \;=\; \bigl({}^oX_{li}S_{li}\bigr)^{\!\top} Y^c_m\,\bigl(r\,{}^oX_mS_m\bigr) \;=\; r\,S_{li}^\top\,{}^{li}X_m^{*}\,Y^c_m\,S_m \;=\; r\,M_{\text{ext}}[li,\,m]$$
+
+即**祖先 $li$ 与 mimic $m$ 之间的惯性耦合**。注意这里直接读 `data.J`——WORLD 约定下每个关节的世界系子空间在 Pass 1 就已备好，不需要像 LOCAL 那样逐级搬运力集、也不需要访问者去取 $S_{li}$。
+
+> ⚠️ **形状**：`J.middleCols(...)` 是 $6\times\texttt{sup\_nvExtended}$，转置后 $\texttt{sup\_nvExtended}\times6$，
+> 乘 $6\times\texttt{mims\_nvExtended}$ 的 `Ag_sec` ——
+> 所以 **`temp_JAG` 是 $\texttt{sup\_nvExtended}\times\texttt{mims\_nvExtended}$**。记住这个形状，§11.6 会用到。
+
+**(c) 为什么要比较 `sup_idx_v` 和 `mims_idx_v`。**
+普通关节里，祖先的 `idx_v` **总是**小于后代的，所以 $M[\text{祖先},\text{后代}]$ 天然落在上三角，闭着眼睛写就行。
+但 mimic 的写入行号是 `mims_idx_v` = **主动关节的列号**，而主动关节在树里的位置和 mimic 无关——它可能排在这个祖先前面，也可能后面。
+所以必须比一下大小，把这块耦合放到"**行号 ≤ 列号**"的那个位置：
+
+| 条件 | 落点 | 含义 |
+|---|---|---|
+| `sup_idx_v > mims_idx_v` | `M[mims_idx_v, sup_idx_v]` | 主动关节列更靠前 → mimic 做行、祖先做列 |
+| `sup_idx_v < mims_idx_v` | `M[sup_idx_v, mims_idx_v]` | 祖先列更靠前 → 祖先做行、mimic 做列 |
+| `sup_idx_v == mims_idx_v` | `M[a, a]` 对角块 | 见 (d) |
+
+CRBA 只填上三角（§9.1），下三角靠使用者镜像，所以**必须**保证每块都落在上三角侧。
+
+**(d) 相等时为什么加两次。**
+`sup_idx_v == mims_idx_v` 意味着这个祖先**和 mimic 共用同一列**——两种情况：
+
+- 祖先就是**被模仿的主动关节** $p$ 本身（最常见：mimic 跟随它上游的某个关节）；
+- 祖先是**另一个同主动的 mimic**（多个从动关节跟随同一个主动关节）。
+
+此时耦合落在对角块 $M[a,a]$ 上。回到 $M=G^\top M_{\text{ext}}G$ 的展开：
+
+$$M[a,a]\;=\;\underbrace{M_{\text{ext}}[p,p]}_{\text{Pass 2}}\;+\;\underbrace{2r\,M_{\text{ext}}[p,m]}_{\textbf{这里}}\;+\;\underbrace{r^2M_{\text{ext}}[m,m]}_{\text{第 ② 步}}$$
+
+而 `temp_JAG` $= r\,M_{\text{ext}}[p,m]$ —— **交叉项 $M_{ps}$ 与 $M_{sp}$ 对称，折叠到同一个上三角格子里就是两份**，所以加两次。写成 `+= temp_JAG` 两遍而不是 `+= 2*temp_JAG`，纯粹是代码风格。
+
+
 ### 7.6 收尾那 6 行：质心动量矩阵是怎么"顺带"算出来的
 
 ```cpp
@@ -1115,6 +1192,108 @@ data.M.block(jmodel.idx_v(), jmodel.idx_v(), jmodel.nv(), data.nvSubtree[i]) = .
 | Pass 3 | 空函数体 | 四（LOCAL）/ 五（WORLD）步补账，全用 `+=` |
 
 **一句话记忆**：mimic 关节在 Pass 2 里"**只传惯量、不写矩阵**"，因为它的 `idx_v` 会踩到主动关节的格子；账留到 Pass 3 用累加方式补上。
+
+---
+
+### 11.6 两个已发现的缺陷（阅读源码时实测所得）
+
+> 以下两条是我在逐行核对 Pass 3 时发现并复现的问题，**均已给出验证过的候选修法，但未提交到本仓库**。
+> 补丁存放于 `scratchpad/mimic_fixes.patch`。上游版本：本仓库 HEAD（pinocchio 4.0.0）。
+
+#### 缺陷 A：mimic 正下方分叉时，第 ③ 步漏算部分列
+
+第 ③ 步用 `mimic_subtree_joint` 找到下游列区间的**起点**（因为 mimic 自己的 `idx_v` 是主动关节的列，不能用作起点），但**宽度**也取了 `nvSubtree[sub_mimic_id]`：
+
+```cpp
+.middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[sub_mimic_id])
+```
+
+`nvSubtree[sub_mimic_id]` 是"**那一个关节**的子树"的自由度数，而不是"mimic **全部下游**"的自由度数。mimic 正下方分叉时两者不等，后面的分支被整段漏掉。
+
+**复现**（两棵树只差 mimic 下方有没有分叉，全部用旋转关节）：
+
+```
+A:  0 ─ j1 ─ [j2=mimic] ─ j3 ─ j4                 单链
+B:  0 ─ j1 ─ [j2=mimic] ─┬─ j3                    分叉
+                         └─ j4 ─ j5
+```
+
+用 **RNEA 逐列重建 $M$**（$Me_k=\mathrm{rnea}(q,0,e_k)-\mathrm{rnea}(q,0,0)$，完全不经过 $G$）作独立对照：
+
+| 用例 | `mimic_subtree_joint` | 覆盖列 | 实际需要 | $\lVert M_{\text{crba}}-M_{\text{rnea}}\rVert$ |
+|---|---|---|---|---|
+| A 单链 | j3 | [1, 2] | {1, 2} | $4.9\times10^{-15}$ ✅ |
+| **B 分叉** | j3 | **[1, 1]** | **{1, 2, 3}** | **$5.8\times10^{-1}$** ❌ |
+
+误差恰好落在 $M(0,2)$、$M(0,3)$——正是被漏掉的 j4、j5 两列。LOCAL 与 WORLD **误差完全相同**，因为共用同一个 `mimic_subtree_joint`。
+
+**候选修法**：宽度改用 `nvSubtree[mimicking_id]`（因 mimic 的 `nv()==0`，它恰等于"mimic 全部下游的真实自由度数"），起点不变：
+
+```diff
+-  .middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[sub_mimic_id])
++  .middleCols(model.idx_vs[sub_mimic_id], data.nvSubtree[mimicking_id])
+```
+
+（WORLD [crba.hxx:173](../include/pinocchio/src/algorithm/crba.hxx#L173)+176、LOCAL [crba.hxx:419](../include/pinocchio/src/algorithm/crba.hxx#L419)+421 各两处引用。）
+
+#### 缺陷 B：支撑链循环的"填行"分支缺 `.transpose()`
+
+由 §7.5(b)，`temp_JAG` 的形状是 $\texttt{sup\_nvExtended}\times\texttt{mims\_nvExtended}$。而两个分支的目标块：
+
+| 分支 | 目标块形状 | 与 `temp_JAG` |
+|---|---|---|
+| 填列（`else`） | $\texttt{sup\_nvExtended}\times\texttt{mims\_nvExtended}$ | ✅ 一致 |
+| **填行（`if`）** | $\texttt{mims\_nvExtended}\times\texttt{sup\_nvExtended}$ | ❌ **转置反了** |
+
+两者只在 `sup_nvExtended == mims_nvExtended` 时碰巧相容——而官方 12 个 `MimicTestCases` 的 mimic 和相关祖先**全是 1 自由度关节**，所以一直没暴露。
+
+**复现**：让 mimic 与祖先的自由度数不同即可。
+
+```
+0 ─ j1(RX, 主动) ─ j2(Spherical, nv=3) ─ j3(RX, mimic of j1)
+```
+
+此时循环走到祖先 j2：`sup_idx_v=1 ≥ mims_idx_v=0` → 进"填行"分支，
+`temp_JAG` 是 $3\times1$，目标块是 $1\times3$。实测：
+
+| 构建 | 结果 |
+|---|---|
+| Debug（Eigen 断言开启） | **直接 abort**：`Assertion 'dst.rows()==src.rows() && dst.cols()==src.cols()' failed`（LOCAL / WORLD 均如此） |
+| Release（`-DNDEBUG`，pinocchio 默认） | **不报错、静默算错**，$M(0,3)$ 得 $-0.194$，正确值 $-1.194$ |
+
+Release 下 Eigen 断言被关掉，所以这是**静默的错误结果**，比崩溃更麻烦。
+
+**候选修法**：填行分支加转置（两处，含"再加一次"那句）：
+
+```diff
+-  data.M.block(mims_idx_v, sup_idx_v, mims_nvExtended, sup_nvExtended).noalias() += temp_JAG;
++  data.M.block(mims_idx_v, sup_idx_v, mims_nvExtended, sup_nvExtended).noalias() += temp_JAG.transpose();
+```
+
+（WORLD [crba.hxx:199](../include/pinocchio/src/algorithm/crba.hxx#L199)+205、LOCAL [crba.hxx:446](../include/pinocchio/src/algorithm/crba.hxx#L446)+452 各两处。）
+
+#### 修法验证与边界
+
+两条修法同时打上后：
+
+| 检验 | 修前 | 修后 |
+|---|---|---|
+| 用例 B（分叉） | $5.8\times10^{-1}$ | $\mathbf{1.2\times10^{-14}}$ |
+| 球关节祖先用例（Debug） | abort | 不再 abort |
+| 官方 12 个 `MimicTestCases` | 通过 | **12/12 通过**（vs $G^\top M_{\text{full}}G$ 最差 $3.5\times10^{-13}$，vs RNEA 最差 $6.7\times10^{-13}$） |
+
+**未解决的部分**：球关节祖先那个用例修后仍有 $2.5\times10^{-2}$ 的残差。但我用的 RNEA 参照**在球关节上本身就不精确**——在**完全没有 mimic** 的纯净模型上实测：
+
+```
+纯旋转 RX-RY          ||crba - rnea|| = 1.0e-15
+含球关节 RX-Spherical ||crba - rnea|| = 1.1e-03   ← 参照本身有偏差
+含浮动基 FF-RX        ||crba - rnea|| = 8.4e-15
+```
+
+所以这个残差**无法归因给 CRBA 的 mimic 处理**，本文不作此声称，留待进一步排查。
+
+**其它边界**：候选修法只在上述 15 个用例上验证过，**没有跑 pinocchio 完整测试套件**；验证时绕过了预编译库的显式模板实例化（纯头文件编译）。属于**经过验证的候选修法**，不是已定论的上游补丁。
+
 
 ---
 
